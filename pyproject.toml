@@ -40,6 +40,7 @@ qwen = [
 ]
 chatterbox = [
     "chatterbox-tts",
+    "setuptools<82",
 ]
 validation = [
     "faster-whisper>=1.0",

@@ -21,13 +21,11 @@ __version__ = "0.1.0"
 from .base_tts import BaseTTS
 from .cancellation import CancellationToken, CancelledException
 from .factory import TTSFactory
-from .generator import GenerateAudio
 
 __all__ = [
     "BaseTTS",
     "CancellationToken",
     "CancelledException",
-    "GenerateAudio",
     "TTSFactory",
     "__version__",
     "launch_ui",

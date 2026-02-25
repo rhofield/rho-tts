@@ -106,6 +106,7 @@ class VoiceProfile:
     reference_audio: Optional[str] = None
     reference_text: Optional[str] = None
     speaker: Optional[str] = None
+    provider: Optional[str] = None  # set on builtins; None = works with any provider
 
     def to_dict(self) -> dict:
         d = {
@@ -139,12 +140,13 @@ _QWEN_CUSTOM_SPEAKERS = [
 ]
 
 BUILTIN_VOICES: List[VoiceProfile] = [
-    VoiceProfile(id="builtin:chatterbox_default", name="Chatterbox Default"),
+    VoiceProfile(id="builtin:chatterbox_default", name="Chatterbox Default", provider="chatterbox"),
     *(
         VoiceProfile(
             id=f"builtin:qwen_{s.lower()}",
             name=f"Qwen — {s}",
             speaker=s,
+            provider="qwen",
         )
         for s in _QWEN_CUSTOM_SPEAKERS
     ),

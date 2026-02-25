@@ -308,6 +308,28 @@ def voice_choices(config: AppConfig) -> list[tuple[str, str]]:
     return builtin + user
 
 
+def voice_choices_for_model(
+    config: AppConfig, model_id: Optional[str]
+) -> list[tuple[str, str]]:
+    """Return voice choices filtered by the selected model's provider.
+
+    Built-in voices are filtered to only those matching the model's
+    provider. User-created voices (provider=None) are always included
+    since they carry reference audio usable by any provider.
+    """
+    if not model_id:
+        return voice_choices(config)
+
+    model_cfg = config.models.get(model_id)
+    if model_cfg is None:
+        return voice_choices(config)
+
+    provider = model_cfg.provider
+    builtin = [(v.name, v.id) for v in BUILTIN_VOICES if v.provider == provider]
+    user = [(v.name, v.id) for v in config.voices.values()]
+    return builtin + user
+
+
 def model_choices(config: AppConfig) -> list[tuple[str, str]]:
     """Return (display_label, value) pairs for model dropdown."""
     return [(m.name, m.id) for m in config.models.values()]

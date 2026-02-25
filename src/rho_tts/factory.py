@@ -22,14 +22,12 @@ class TTSFactory:
             return
         cls._default_providers_registered = True
 
-        # Try to register Qwen provider
         try:
             from .providers.qwen import QwenTTS
             cls._providers["qwen"] = QwenTTS
         except ImportError:
             pass
 
-        # Try to register Chatterbox provider
         try:
             from .providers.chatterbox import ChatterboxTTS
             cls._providers["chatterbox"] = ChatterboxTTS

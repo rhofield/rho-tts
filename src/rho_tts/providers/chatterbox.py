@@ -2,7 +2,7 @@
 Chatterbox TTS provider implementation.
 
 Used for single segment regeneration with comprehensive validation
-including accent drift checking, speaker similarity, and STT validation.
+including accent drift checking and STT validation.
 Supports both default voice and voice cloning via reference audio.
 """
 import copy
@@ -35,7 +35,6 @@ class ChatterboxTTS(BaseTTS):
         max_iterations: Maximum validation retry iterations (default: 50)
         accent_drift_threshold: Threshold for accent drift (default: 0.17)
         text_similarity_threshold: Min similarity for STT validation (default: 0.75)
-        speaker_similarity_threshold: Min cosine similarity for speaker matching (default: 0.85)
         phonetic_mapping: Custom word-to-pronunciation mapping
     """
 
@@ -50,7 +49,6 @@ class ChatterboxTTS(BaseTTS):
         max_iterations: int = 50,
         accent_drift_threshold: float = 0.17,
         text_similarity_threshold: float = 0.75,
-        speaker_similarity_threshold: float = 0.85,
         phonetic_mapping: Optional[Dict[str, str]] = None,
     ):
         super().__init__(device, seed, deterministic, phonetic_mapping=phonetic_mapping)
@@ -67,7 +65,6 @@ class ChatterboxTTS(BaseTTS):
         self.MAX_ITERATIONS = max_iterations
         self.ACCENT_DRIFT_THRESHOLD = accent_drift_threshold
         self.TEXT_SIMILARITY_THRESHOLD = text_similarity_threshold
-        self.SPEAKER_SIMILARITY_THRESHOLD = speaker_similarity_threshold
 
         # Initialize the base ChatterboxTTS model
         try:
@@ -78,23 +75,17 @@ class ChatterboxTTS(BaseTTS):
                 "Install with: pip install rho-tts[chatterbox]"
             )
 
+        # Detect broken perth watermarker (setuptools>=82 removes pkg_resources)
+        import perth
+        if perth.PerthImplicitWatermarker is None:
+            raise ImportError(
+                "The 'perth' audio watermarker failed to initialize "
+                "(missing 'pkg_resources' — likely setuptools>=82). "
+                "Fix: pip install 'setuptools<82'"
+            )
+
         self.model = ChatterboxModel.from_pretrained(device=device)
         self._prompt_cache: Dict = {}
-
-        # Initialize reference embedding (only for voice cloning)
-        if self.voice_cloning:
-            try:
-                from resemblyzer import preprocess_wav
-
-                logger.info("Loading voice encoder for speaker similarity validation...")
-                reference_wav = preprocess_wav(self.reference_audio_path)
-                self.reference_embedding = self.voice_encoder.embed_utterance(reference_wav)
-                logger.info("Reference voice embedding computed")
-            except ImportError:
-                logger.warning(
-                    "resemblyzer not installed, speaker similarity validation disabled. "
-                    "Install with: pip install rho-tts[validation]"
-                )
 
         if implementation == "faster":
             logger.info("Using 'faster' implementation with rsxdalv optimizations")
@@ -134,8 +125,7 @@ class ChatterboxTTS(BaseTTS):
         """
         Generate audio with comprehensive validation loop.
 
-        Implements accent drift checking, speaker similarity validation,
-        and text accuracy validation via STT.
+        Implements accent drift checking and text accuracy validation via STT.
         """
         try:
             self._set_seeds()
@@ -171,22 +161,14 @@ class ChatterboxTTS(BaseTTS):
                         ta.save(temp_output_path, wav, self.model.sr)
 
                         # Step 1: Check accent drift
-                        drift_prob, is_accent_ok = self._validate_accent_drift(temp_output_path)
-
-                        # Step 2: Check speaker similarity (currently using passthrough)
-                        speaker_similarity = 1
-                        is_speaker_similar = speaker_similarity > self.SPEAKER_SIMILARITY_THRESHOLD
-                        threshold = self.SPEAKER_SIMILARITY_THRESHOLD
-                        logger.info(f"Speaker similarity: {speaker_similarity:.3f} (threshold: {threshold})")
-
-                        is_voice_accurate = is_accent_ok and is_speaker_similar
+                        drift_prob, is_voice_accurate = self._validate_accent_drift(temp_output_path)
 
                         if drift_prob < best_accent_drift:
                             best_accent_drift = drift_prob
                             best_wav = wav.clone()
                             logger.info(f"   New best: accent drift {best_accent_drift:.3f}")
 
-                        # Step 3: Text accuracy
+                        # Step 2: Text accuracy
                         is_text_accurate = True
                         text_similarity = 1.0
 
@@ -207,10 +189,8 @@ class ChatterboxTTS(BaseTTS):
                             return wav
 
                         failure_reasons = []
-                        if not is_accent_ok:
+                        if not is_voice_accurate:
                             failure_reasons.append(f"accent drift (prob: {drift_prob:.3f})")
-                        if not is_speaker_similar:
-                            failure_reasons.append(f"speaker mismatch (similarity: {speaker_similarity:.3f})")
                         if not is_text_accurate:
                             failure_reasons.append(f"text mismatch (similarity: {text_similarity:.3f})")
 
@@ -230,7 +210,6 @@ class ChatterboxTTS(BaseTTS):
                     logger.warning("Max iterations reached, returning last generated audio")
                     return wav
 
-            # Split text into segments
             segments = self._split_text_into_segments(text, self.MAX_CHARS_PER_SEGMENT)
             audio_segments = []
 
@@ -317,29 +296,6 @@ class ChatterboxTTS(BaseTTS):
             logger.error(f"Error in Chatterbox TTS: {e}")
             traceback.print_exc()
             return None
-
-    def _validate_accent_drift(self, audio_path: str) -> tuple:
-        """Run accent drift validation if classifier is available."""
-        try:
-            from ..validation.classifier import predict_accent_drift_probability
-            drift_prob = predict_accent_drift_probability(audio_path)
-            is_ok = drift_prob is not None and drift_prob < self.ACCENT_DRIFT_THRESHOLD
-            return (drift_prob if drift_prob is not None else 0.0), is_ok
-        except ImportError:
-            logger.debug("Accent drift classifier not available, skipping validation")
-            return 0.0, True
-
-    def _validate_text_match(self, audio_path: str, expected_text: str) -> tuple:
-        """Run STT text matching validation if available."""
-        try:
-            from ..validation.stt.stt_validator import validate_audio_text_match
-            is_accurate, similarity, transcribed = validate_audio_text_match(
-                audio_path, expected_text, self.TEXT_SIMILARITY_THRESHOLD
-            )
-            return is_accurate, similarity, transcribed
-        except ImportError:
-            logger.debug("STT validator not available, skipping text validation")
-            return True, 1.0, None
 
     @property
     def sample_rate(self) -> int:

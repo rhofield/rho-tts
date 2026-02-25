@@ -460,31 +460,6 @@ class QwenTTS(BaseTTS):
 
         return None
 
-    def _validate_accent_drift(self, audio_path: str) -> tuple:
-        """Run accent drift validation if classifier is available."""
-        try:
-            from ..validation.classifier import predict_accent_drift_probability
-            drift_prob = predict_accent_drift_probability(audio_path)
-            is_ok = drift_prob is not None and drift_prob <= self.ACCENT_DRIFT_THRESHOLD
-            return (drift_prob if drift_prob is not None else 0.0), is_ok
-        except ImportError:
-            logger.debug("Accent drift classifier not available, skipping validation")
-            return 0.0, True
-
-    def _validate_text_match(self, audio_path: str, expected_text: str) -> tuple:
-        """Run STT text matching validation if available."""
-        try:
-            from ..validation.stt.stt_validator import validate_audio_text_match
-            is_accurate, similarity, transcribed = validate_audio_text_match(
-                audio_path, expected_text, self.TEXT_SIMILARITY_THRESHOLD
-            )
-            if transcribed:
-                logger.info(f"  Text similarity: {similarity:.3f}")
-            return is_accurate, similarity, transcribed
-        except ImportError:
-            logger.debug("STT validator not available, skipping text validation")
-            return True, 1.0, None
-
     @property
     def sample_rate(self) -> int:
         """Get the sample rate for Qwen3-TTS."""

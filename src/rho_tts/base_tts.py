@@ -46,6 +46,10 @@ class BaseTTS(ABC):
         self.phonetic_mapping = phonetic_mapping if phonetic_mapping is not None else DEFAULT_PHONETIC_MAPPING.copy()
         self._set_seeds()
 
+        # Validation thresholds (subclasses override as needed)
+        self.ACCENT_DRIFT_THRESHOLD = 0.17
+        self.TEXT_SIMILARITY_THRESHOLD = 0.85
+
         # Audio segment smoothing parameters
         self.silence_threshold_db = -50.0
         self.crossfade_duration_sec = 0.05
@@ -102,6 +106,31 @@ class BaseTTS(ABC):
         for original, phonetic in self.phonetic_mapping.items():
             updated_text = updated_text.replace(original, phonetic)
         return updated_text
+
+    def _validate_accent_drift(self, audio_path: str) -> tuple:
+        """Run accent drift validation if classifier is available."""
+        if not getattr(self, 'voice_cloning', False):
+            return 0.0, True
+        try:
+            from .validation.classifier import predict_accent_drift_probability
+            drift_prob = predict_accent_drift_probability(audio_path)
+            is_ok = drift_prob is not None and drift_prob < self.ACCENT_DRIFT_THRESHOLD
+            return (drift_prob if drift_prob is not None else 0.0), is_ok
+        except ImportError:
+            logger.debug("Accent drift classifier not available, skipping validation")
+            return 0.0, True
+
+    def _validate_text_match(self, audio_path: str, expected_text: str) -> tuple:
+        """Run STT text matching validation if available."""
+        try:
+            from .validation.stt.stt_validator import validate_audio_text_match
+            is_accurate, similarity, transcribed = validate_audio_text_match(
+                audio_path, expected_text, self.TEXT_SIMILARITY_THRESHOLD
+            )
+            return is_accurate, similarity, transcribed
+        except ImportError:
+            logger.debug("STT validator not available, skipping text validation")
+            return True, 1.0, None
 
     def _compute_speaker_similarity(self, wav_tensor: torch.Tensor) -> float:
         """

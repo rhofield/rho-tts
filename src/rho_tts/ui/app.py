@@ -28,14 +28,16 @@ def _build_app(state: AppState) -> gr.Blocks:
 
         # ── shared helpers ──────────────────────────────────────────
 
-        def _voice_choices():
-            return gr.Dropdown(choices=callbacks.voice_choices(state.config))
+        def _voice_choices(model_id=None):
+            return gr.Dropdown(
+                choices=callbacks.voice_choices_for_model(state.config, model_id),
+            )
 
         def _model_choices():
             return gr.Dropdown(choices=callbacks.model_choices(state.config))
 
-        def _refresh_dropdowns():
-            return _model_choices(), _voice_choices()
+        def _refresh_dropdowns(model_id=None):
+            return _model_choices(), _voice_choices(model_id)
 
         # ── Tab 1: Generate ─────────────────────────────────────────
 
@@ -100,20 +102,34 @@ def _build_app(state: AppState) -> gr.Blocks:
 
             device_dd.change(fn=_on_device_change, inputs=[device_dd])
 
-            def _on_voice_or_model_change(voice_id, model_id):
-                """Reload phonetic mapping when voice or model changes."""
+            def _on_voice_change(voice_id, model_id):
+                """Reload phonetic mapping when voice changes."""
                 rows, label = callbacks.load_phonetic_mapping(state, voice_id, model_id)
                 return rows, label
 
+            def _on_model_change(voice_id, model_id):
+                """Filter voices for provider and reload phonetic mapping."""
+                choices = callbacks.voice_choices_for_model(state.config, model_id)
+                valid_ids = {c[1] for c in choices}
+                new_voice_id = voice_id if voice_id in valid_ids else None
+                rows, label = callbacks.load_phonetic_mapping(
+                    state, new_voice_id, model_id,
+                )
+                return (
+                    gr.Dropdown(choices=choices, value=new_voice_id),
+                    rows,
+                    label,
+                )
+
             voice_dd.change(
-                fn=_on_voice_or_model_change,
+                fn=_on_voice_change,
                 inputs=[voice_dd, model_dd],
                 outputs=[mapping_df, mapping_label],
             )
             model_dd.change(
-                fn=_on_voice_or_model_change,
+                fn=_on_model_change,
                 inputs=[voice_dd, model_dd],
-                outputs=[mapping_df, mapping_label],
+                outputs=[voice_dd, mapping_df, mapping_label],
             )
 
             def _generate(model_id, voice_id, text):
@@ -172,23 +188,23 @@ def _build_app(state: AppState) -> gr.Blocks:
 
             # -- Voice events --
 
-            def _add_voice(vid, vname, vaudio, vref):
+            def _add_voice(vid, vname, vaudio, vref, current_model_id):
                 table, msg = callbacks.add_voice(state, vid, vname, vaudio, vref)
-                return table, msg, _voice_choices(), _model_choices()
+                return table, msg, _voice_choices(current_model_id), _model_choices()
 
             v_add_btn.click(
                 fn=_add_voice,
-                inputs=[v_id, v_name, v_audio, v_ref_text],
+                inputs=[v_id, v_name, v_audio, v_ref_text, model_dd],
                 outputs=[v_table, v_status, voice_dd, model_dd],
             )
 
-            def _del_voice(vid):
+            def _del_voice(vid, current_model_id):
                 table, msg = callbacks.delete_voice(state, vid)
-                return table, msg, _voice_choices(), _model_choices()
+                return table, msg, _voice_choices(current_model_id), _model_choices()
 
             v_del_btn.click(
                 fn=_del_voice,
-                inputs=[v_del_id],
+                inputs=[v_del_id, model_dd],
                 outputs=[v_table, v_status, voice_dd, model_dd],
             )
 
@@ -270,7 +286,7 @@ def _build_app(state: AppState) -> gr.Blocks:
 
             # -- Model events --
 
-            def _add_model(mprov, mmodel, miter, macc, mtsim):
+            def _add_model(mprov, mmodel, miter, macc, mtsim, current_model_id):
                 table, msg = callbacks.add_model(
                     state, mprov, mmodel, miter, macc, mtsim,
                 )
@@ -278,29 +294,29 @@ def _build_app(state: AppState) -> gr.Blocks:
                     table,
                     msg,
                     _model_choices(),
-                    _voice_choices(),
+                    _voice_choices(current_model_id),
                     gr.Dropdown(choices=callbacks.model_choices(state.config)),
                 )
 
             m_add_btn.click(
                 fn=_add_model,
-                inputs=[m_provider, m_model_select, m_max_iter, m_accent, m_text_sim],
+                inputs=[m_provider, m_model_select, m_max_iter, m_accent, m_text_sim, model_dd],
                 outputs=[m_table, m_status, model_dd, voice_dd, m_del_dd],
             )
 
-            def _del_model(model_id):
+            def _del_model(model_id, current_model_id):
                 table, msg = callbacks.delete_model(state, model_id)
                 return (
                     table,
                     msg,
                     _model_choices(),
-                    _voice_choices(),
+                    _voice_choices(current_model_id),
                     gr.Dropdown(choices=callbacks.model_choices(state.config)),
                 )
 
             m_del_btn.click(
                 fn=_del_model,
-                inputs=[m_del_dd],
+                inputs=[m_del_dd, model_dd],
                 outputs=[m_table, m_status, model_dd, voice_dd, m_del_dd],
             )
 
