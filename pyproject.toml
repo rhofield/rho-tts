@@ -1,0 +1,80 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ralph-tts"
+version = "0.1.0"
+description = "Multi-provider text-to-speech library with voice cloning, accent drift detection, and STT validation"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "Ryan" },
+]
+keywords = ["tts", "text-to-speech", "voice-cloning", "speech-synthesis", "ai"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "torch>=2.0",
+    "torchaudio>=2.0",
+    "numpy",
+    "pydub",
+]
+
+[project.optional-dependencies]
+qwen = [
+    "qwen-tts",
+    "transformers>=4.40",
+]
+chatterbox = [
+    "chatterbox-tts",
+]
+validation = [
+    "faster-whisper>=1.0",
+    "resemblyzer>=0.1.3",
+    "scikit-learn>=1.3",
+    "joblib",
+    "librosa>=0.10",
+    "parselmouth",
+    "num2words",
+    "word2number",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "ruff",
+]
+all = [
+    "ralph-tts[qwen,chatterbox,validation,dev]",
+]
+
+[project.urls]
+Homepage = "https://github.com/ryanmac/ralph-tts"
+Repository = "https://github.com/ryanmac/ralph-tts"
+Issues = "https://github.com/ryanmac/ralph-tts/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ralph_tts"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
