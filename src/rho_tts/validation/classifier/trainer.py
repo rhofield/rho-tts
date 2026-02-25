@@ -6,7 +6,7 @@ to detect accent drift in TTS output. The trained model is used by
 the classifier module for runtime validation.
 
 Usage:
-    python -m ralph_tts.validation.classifier.trainer --dataset-dir /path/to/dataset
+    python -m rho_tts.validation.classifier.trainer --dataset-dir /path/to/dataset
 
 The dataset directory should contain 'good/' and 'bad/' subdirectories
 with .wav files.

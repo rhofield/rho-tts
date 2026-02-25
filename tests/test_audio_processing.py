@@ -1,7 +1,7 @@
 """Tests for audio processing utilities: silence trimming, fades, DC offset removal."""
 import torch
 
-from ralph_tts.base_tts import BaseTTS
+from rho_tts.base_tts import BaseTTS
 
 
 class ConcreteTTS:

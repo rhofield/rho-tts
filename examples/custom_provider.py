@@ -2,13 +2,13 @@
 Custom TTS provider registration example.
 
 Shows how to create and register your own TTS provider that
-integrates with the ralph-tts factory pattern.
+integrates with the rho-tts factory pattern.
 """
 from typing import Dict, List, Optional, Union
 
 import torch
 
-from ralph_tts import BaseTTS, CancellationToken, TTSFactory
+from rho_tts import BaseTTS, CancellationToken, TTSFactory
 
 
 class MyCustomTTS(BaseTTS):

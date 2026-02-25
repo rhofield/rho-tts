@@ -3,6 +3,7 @@ Chatterbox TTS provider implementation.
 
 Used for single segment regeneration with comprehensive validation
 including accent drift checking, speaker similarity, and STT validation.
+Supports both default voice and voice cloning via reference audio.
 """
 import copy
 import logging
@@ -27,7 +28,8 @@ class ChatterboxTTS(BaseTTS):
         device: Device to run the model on ('cuda' or 'cpu')
         seed: Random seed for consistent voice generation
         deterministic: If True, use deterministic CUDA operations
-        reference_audio: Path to audio file for voice cloning (required)
+        reference_audio: Path to audio file for voice cloning (optional).
+            If not provided, uses the model's default voice.
         implementation: "standard" or "faster" (rsxdalv optimizations)
         max_chars_per_segment: Max characters per text segment (default: 800)
         max_iterations: Maximum validation retry iterations (default: 50)
@@ -53,13 +55,11 @@ class ChatterboxTTS(BaseTTS):
     ):
         super().__init__(device, seed, deterministic, phonetic_mapping=phonetic_mapping)
 
-        if reference_audio is None:
-            raise ValueError("reference_audio path is required for ChatterboxTTS voice cloning")
-
         if implementation not in ("standard", "faster"):
             raise ValueError(f"Invalid implementation '{implementation}'. Must be 'standard' or 'faster'")
 
         self.reference_audio_path = reference_audio
+        self.voice_cloning = reference_audio is not None
         self.implementation = implementation
 
         # Configurable thresholds
@@ -75,25 +75,26 @@ class ChatterboxTTS(BaseTTS):
         except ImportError:
             raise ImportError(
                 "chatterbox-tts is required for ChatterboxTTS. "
-                "Install with: pip install ralph-tts[chatterbox]"
+                "Install with: pip install rho-tts[chatterbox]"
             )
 
         self.model = ChatterboxModel.from_pretrained(device=device)
         self._prompt_cache: Dict = {}
 
-        # Initialize reference embedding
-        try:
-            from resemblyzer import preprocess_wav
+        # Initialize reference embedding (only for voice cloning)
+        if self.voice_cloning:
+            try:
+                from resemblyzer import preprocess_wav
 
-            logger.info("Loading voice encoder for speaker similarity validation...")
-            reference_wav = preprocess_wav(self.reference_audio_path)
-            self.reference_embedding = self.voice_encoder.embed_utterance(reference_wav)
-            logger.info("Reference voice embedding computed")
-        except ImportError:
-            logger.warning(
-                "resemblyzer not installed, speaker similarity validation disabled. "
-                "Install with: pip install ralph-tts[validation]"
-            )
+                logger.info("Loading voice encoder for speaker similarity validation...")
+                reference_wav = preprocess_wav(self.reference_audio_path)
+                self.reference_embedding = self.voice_encoder.embed_utterance(reference_wav)
+                logger.info("Reference voice embedding computed")
+            except ImportError:
+                logger.warning(
+                    "resemblyzer not installed, speaker similarity validation disabled. "
+                    "Install with: pip install rho-tts[validation]"
+                )
 
         if implementation == "faster":
             logger.info("Using 'faster' implementation with rsxdalv optimizations")
@@ -104,7 +105,7 @@ class ChatterboxTTS(BaseTTS):
         audio_prompt_path: Optional[str] = None,
         **kwargs,
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
-        """Generate audio with voice prompt caching for better performance."""
+        """Generate audio, with voice prompt caching when cloning."""
         if isinstance(text, list):
             return [self._generate_audio(t, audio_prompt_path, **kwargs) for t in text]
 
@@ -161,7 +162,7 @@ class ChatterboxTTS(BaseTTS):
 
                     wav = self._generate_audio(
                         text,
-                        audio_prompt_path=self.reference_audio_path,
+                        audio_prompt_path=self.reference_audio_path if self.voice_cloning else None,
                         temperature=temp,
                         cfg_weight=cfg,
                     )

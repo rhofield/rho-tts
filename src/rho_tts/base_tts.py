@@ -68,7 +68,7 @@ class BaseTTS(ABC):
             except ImportError:
                 raise ImportError(
                     "resemblyzer is required for speaker similarity validation. "
-                    "Install it with: pip install ralph-tts[validation]"
+                    "Install it with: pip install rho-tts[validation]"
                 )
         return self._voice_encoder
 

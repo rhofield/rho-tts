@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from ralph_tts.cancellation import CancellationToken, CancelledException
+from rho_tts.cancellation import CancellationToken, CancelledException
 
 
 class TestCancellationToken:

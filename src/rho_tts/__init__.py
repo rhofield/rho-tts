@@ -1,9 +1,13 @@
 """
-ralph-tts: Multi-provider text-to-speech with voice cloning and quality validation.
+rho-tts: Multi-provider text-to-speech with optional voice cloning and quality validation.
 
-Quick start:
-    from ralph_tts import TTSFactory
+Quick start (default voice):
+    from rho_tts import TTSFactory
 
+    tts = TTSFactory.get_tts_instance(provider="qwen")
+    tts.generate_single("Hello world!", "output.wav")
+
+Voice cloning:
     tts = TTSFactory.get_tts_instance(
         provider="qwen",
         reference_audio="voice_sample.wav",
@@ -26,4 +30,12 @@ __all__ = [
     "GenerateAudio",
     "TTSFactory",
     "__version__",
+    "launch_ui",
 ]
+
+
+def launch_ui(**kwargs):
+    """Launch the Gradio web UI. Requires ``pip install rho-tts[ui]``."""
+    from .ui import launch_ui as _launch_ui
+
+    _launch_ui(**kwargs)

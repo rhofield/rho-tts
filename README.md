@@ -1,4 +1,4 @@
-# ralph-tts
+# rho-tts
 
 Multi-provider text-to-speech library with voice cloning, accent drift detection, and STT validation.
 
@@ -18,19 +18,19 @@ Multi-provider text-to-speech library with voice cloning, accent drift detection
 
 ```bash
 # Core only (brings torch, torchaudio, numpy, pydub)
-pip install ralph-tts
+pip install rho-tts
 
 # With Qwen3-TTS provider
-pip install ralph-tts[qwen]
+pip install rho-tts[qwen]
 
 # With Chatterbox provider
-pip install ralph-tts[chatterbox]
+pip install rho-tts[chatterbox]
 
 # With validation (accent drift, STT, speaker similarity)
-pip install ralph-tts[validation]
+pip install rho-tts[validation]
 
 # Everything
-pip install ralph-tts[all]
+pip install rho-tts[all]
 ```
 
 ### System Dependencies
@@ -58,7 +58,7 @@ brew install ffmpeg
 ## Quick Start
 
 ```python
-from ralph_tts import TTSFactory
+from rho_tts import TTSFactory
 
 # Create a TTS instance (requires a reference audio for voice cloning)
 tts = TTSFactory.get_tts_instance(
@@ -132,7 +132,7 @@ All thresholds and parameters can be set via constructor kwargs:
 Register your own TTS implementation:
 
 ```python
-from ralph_tts import BaseTTS, TTSFactory
+from rho_tts import BaseTTS, TTSFactory
 
 class MyTTS(BaseTTS):
     def _generate_audio(self, text, **kwargs):
@@ -155,7 +155,7 @@ tts = TTSFactory.get_tts_instance(provider="my_tts")
 
 ## Validation Pipeline
 
-When validation deps are installed (`pip install ralph-tts[validation]`), generated audio goes through:
+When validation deps are installed (`pip install rho-tts[validation]`), generated audio goes through:
 
 1. **Accent drift detection** — A trained classifier predicts the probability that the voice has drifted from the target accent. Samples exceeding the threshold are regenerated.
 
@@ -167,25 +167,68 @@ When validation deps are installed (`pip install ralph-tts[validation]`), genera
 
 ```bash
 # Prepare a dataset with good/ and bad/ subdirectories containing .wav files
-python -m ralph_tts.validation.classifier.trainer --dataset-dir /path/to/dataset
+python -m rho_tts.validation.classifier.trainer --dataset-dir /path/to/dataset
 
 # Or specify output path
-python -m ralph_tts.validation.classifier.trainer \
+python -m rho_tts.validation.classifier.trainer \
     --dataset-dir /path/to/dataset \
     --output /path/to/voice_quality_model.pkl
 ```
 
 Set the model path via environment variable:
 ```bash
-export RALPH_TTS_CLASSIFIER_MODEL=/path/to/voice_quality_model.pkl
+export RHO_TTS_CLASSIFIER_MODEL=/path/to/voice_quality_model.pkl
 ```
+
+## Web UI
+
+A Gradio-based web interface for interactive TTS generation, voice management, and model configuration.
+
+### Installation
+
+```bash
+# From PyPI (once published)
+pip install rho-tts[ui]
+
+# From local source
+pip install -e ".[ui]"
+```
+
+### Launch
+
+```bash
+# CLI entry point
+rho-tts-ui
+
+# Or as a Python module
+python -m rho_tts.ui
+
+# With options
+rho-tts-ui --host 0.0.0.0 --port 8080 --device cpu --share
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--config` | `~/.rho_tts/config.json` | Path to config JSON file |
+| `--host` | `127.0.0.1` | Server bind address |
+| `--port` | `7860` | Server port |
+| `--device` | `cuda` | `cuda` or `cpu` |
+| `--share` | off | Create a public Gradio link |
+
+The config path can also be set via the `RHO_TTS_CONFIG` environment variable.
+
+### Tabs
+
+- **Generate** — Select a model and voice, enter text, and generate audio with real-time playback. Includes phonetic mapping overrides per voice/model pair.
+- **Voices** — Upload reference audio and transcripts to create reusable voice profiles (stored in `~/.rho_tts/voices/`).
+- **Models** — Configure TTS providers with custom thresholds and parameters.
 
 ## Cancellation
 
 For long-running generation in web servers or UIs:
 
 ```python
-from ralph_tts import CancellationToken, TTSFactory
+from rho_tts import CancellationToken, TTSFactory
 
 token = CancellationToken()
 

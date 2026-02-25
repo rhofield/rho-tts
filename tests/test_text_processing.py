@@ -1,7 +1,7 @@
 """Tests for text processing: phonetic mapping, text splitting, number normalization."""
 import pytest
 
-from ralph_tts.base_tts import BaseTTS
+from rho_tts.base_tts import BaseTTS
 
 
 class ConcreteTTS(BaseTTS):
@@ -102,14 +102,14 @@ class TestNumberNormalization:
     """Test the number normalizer used in STT validation."""
 
     def test_ordinal_suffix(self):
-        from ralph_tts.validation.stt.number_normalizer import normalize_numbers_to_digits
+        from rho_tts.validation.stt.number_normalizer import normalize_numbers_to_digits
 
         assert "1" in normalize_numbers_to_digits("1st")
         assert "2" in normalize_numbers_to_digits("2nd")
         assert "3" in normalize_numbers_to_digits("3rd")
 
     def test_word_to_digit(self):
-        from ralph_tts.validation.stt.number_normalizer import normalize_numbers_to_digits, w2n
+        from rho_tts.validation.stt.number_normalizer import normalize_numbers_to_digits, w2n
 
         if w2n is None:
             pytest.skip("word2number not installed")
@@ -118,13 +118,13 @@ class TestNumberNormalization:
         assert "200" in result
 
     def test_mixed_format(self):
-        from ralph_tts.validation.stt.number_normalizer import normalize_numbers_to_digits
+        from rho_tts.validation.stt.number_normalizer import normalize_numbers_to_digits
 
         result = normalize_numbers_to_digits("3 thousand")
         assert "3000" in result
 
     def test_no_numbers(self):
-        from ralph_tts.validation.stt.number_normalizer import normalize_numbers_to_digits
+        from rho_tts.validation.stt.number_normalizer import normalize_numbers_to_digits
 
         result = normalize_numbers_to_digits("hello world")
         assert result == "hello world"

@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "ralph-tts"
+name = "rho-tts"
 version = "0.1.0"
 description = "Multi-provider text-to-speech library with voice cloning, accent drift detection, and STT validation"
 readme = "README.md"
@@ -51,22 +51,28 @@ validation = [
     "num2words",
     "word2number",
 ]
+ui = [
+    "gradio>=4.0",
+]
 dev = [
     "pytest>=7.0",
     "pytest-cov",
     "ruff",
 ]
 all = [
-    "ralph-tts[qwen,chatterbox,validation,dev]",
+    "rho-tts[qwen,chatterbox,validation,dev,ui]",
 ]
 
+[project.scripts]
+rho-tts-ui = "rho_tts.ui:launch_ui"
+
 [project.urls]
-Homepage = "https://github.com/ryanmac/ralph-tts"
-Repository = "https://github.com/ryanmac/ralph-tts"
-Issues = "https://github.com/ryanmac/ralph-tts/issues"
+Homepage = "https://github.com/ryanmac/rho-tts"
+Repository = "https://github.com/ryanmac/rho-tts"
+Issues = "https://github.com/ryanmac/rho-tts/issues"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/ralph_tts"]
+packages = ["src/rho_tts"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

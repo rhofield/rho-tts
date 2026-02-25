@@ -132,7 +132,7 @@ def transcribe_audio(audio_path: str) -> Optional[str]:
 
         if model_type == "faster-whisper":
             try:
-                segments, _info = model.transcribe(audio_path, language="en")
+                segments = model.transcribe(audio_path, language="en")
                 transcription = " ".join([segment.text for segment in segments])
             except Exception as e:
                 logger.warning(f"Error during faster-whisper transcription: {e}")

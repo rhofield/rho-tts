@@ -2,7 +2,8 @@
 Qwen3-TTS provider implementation.
 
 Primary/default TTS provider for production use. Uses batch processing
-and quality validation for high-quality audio generation with voice cloning.
+and quality validation for high-quality audio generation. Supports both
+default voice and voice cloning via reference audio.
 """
 import logging
 import os
@@ -26,8 +27,9 @@ class QwenTTS(BaseTTS):
         device: Device to run the model on ('cuda' or 'cpu')
         seed: Random seed for consistent voice generation
         deterministic: If True, use deterministic CUDA operations
-        reference_audio: Path to reference audio file for voice cloning (required)
-        reference_text: Transcript of the reference audio (required)
+        reference_audio: Path to reference audio file for voice cloning (optional).
+            If not provided, uses the model's default voice.
+        reference_text: Transcript of the reference audio (required when reference_audio is set)
         model_path: Path to local model or HuggingFace model ID
             (default: "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
         max_chars_per_text: Maximum characters per text segment (default: 6000)
@@ -46,6 +48,7 @@ class QwenTTS(BaseTTS):
         deterministic: bool = False,
         reference_audio: Optional[str] = None,
         reference_text: Optional[str] = None,
+        speaker: Optional[str] = None,
         model_path: str = "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
         max_chars_per_text: int = 6000,
         batch_size: int = 5,
@@ -57,13 +60,13 @@ class QwenTTS(BaseTTS):
     ):
         super().__init__(device, seed, deterministic, phonetic_mapping=phonetic_mapping)
 
-        if reference_audio is None:
-            raise ValueError("reference_audio path is required for QwenTTS voice cloning")
-        if reference_text is None:
-            raise ValueError("reference_text (transcript of reference audio) is required for QwenTTS")
+        if reference_audio is not None and reference_text is None:
+            raise ValueError("reference_text (transcript of reference audio) is required when reference_audio is set")
 
         self.reference_audio_path = reference_audio
         self.reference_text = reference_text
+        self.speaker = speaker
+        self.voice_cloning = reference_audio is not None
         self.model_path = model_path
 
         # Configurable thresholds
@@ -116,7 +119,7 @@ class QwenTTS(BaseTTS):
             except ImportError as e:
                 raise ImportError(
                     f"Failed to import qwen_tts: {e}. "
-                    f"Install with: pip install ralph-tts[qwen]"
+                    f"Install with: pip install rho-tts[qwen]"
                 )
             except Exception as e:
                 raise RuntimeError(f"Failed to load Qwen3-TTS model: {e}")
@@ -125,6 +128,8 @@ class QwenTTS(BaseTTS):
 
     def _initialize_reference_embedding(self):
         """Initialize reference voice embedding after model is loaded."""
+        if not self.voice_cloning:
+            return
         if not self._reference_embedding_initialized and self.qwen3_sr is not None:
             try:
                 from resemblyzer import preprocess_wav
@@ -137,26 +142,47 @@ class QwenTTS(BaseTTS):
             except ImportError:
                 logger.warning(
                     "resemblyzer not installed, speaker similarity validation disabled. "
-                    "Install with: pip install ralph-tts[validation]"
+                    "Install with: pip install rho-tts[validation]"
                 )
 
     def _generate_audio(self, text: Union[str, List[str]], **kwargs) -> Union[torch.Tensor, List[torch.Tensor]]:
-        """Generate audio using Qwen3-TTS with voice cloning."""
+        """Generate audio using Qwen3-TTS.
+
+        Routes to the correct generation method based on model type:
+        - CustomVoice model + speaker → generate_custom_voice()
+        - Base model + reference audio → generate_voice_clone()
+        - Base model + no reference audio → error
+        """
         model = self._load_qwen3_model()
 
         is_single = isinstance(text, str)
         text_list = [text] if is_single else text
 
-        wavs, sr = model.generate_voice_clone(
-            text=text_list,
-            language="English",
-            ref_audio=self.reference_audio_path,
-            ref_text=self.reference_text,
-        )
+        model_type = getattr(model.model, "tts_model_type", "base")
+
+        if model_type == "custom_voice" and self.speaker:
+            wavs, sr = model.generate_custom_voice(
+                text=text_list,
+                speaker=self.speaker,
+                language="English",
+            )
+        elif self.voice_cloning:
+            wavs, sr = model.generate_voice_clone(
+                text=text_list,
+                language="English",
+                ref_audio=self.reference_audio_path,
+                ref_text=self.reference_text,
+            )
+        else:
+            raise ValueError(
+                "Qwen Base model requires reference audio for voice cloning. "
+                "Use a CustomVoice model with a named speaker, or provide reference audio."
+            )
 
         if self.qwen3_sr is None:
             self.qwen3_sr = sr
-            self._initialize_reference_embedding()
+            if self.voice_cloning:
+                self._initialize_reference_embedding()
 
         torch_wavs = [torch.from_numpy(wav).float() for wav in wavs]
         return torch_wavs[0] if is_single else torch_wavs
@@ -298,7 +324,7 @@ class QwenTTS(BaseTTS):
                             temp_path = None
 
                             try:
-                                temp_path = f"/tmp/ralph_tts_validate_{global_idx}_{iteration}.wav"
+                                temp_path = f"/tmp/rho_tts_validate_{global_idx}_{iteration}.wav"
                                 segment_wav = audio_tensor.cpu() if audio_tensor.device.type != 'cpu' else audio_tensor
                                 if segment_wav.dim() == 1:
                                     segment_wav = segment_wav.unsqueeze(0)

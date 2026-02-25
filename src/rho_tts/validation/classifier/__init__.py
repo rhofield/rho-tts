@@ -27,12 +27,12 @@ def _load_model(model_path: Optional[str] = None):
     except ImportError:
         raise ImportError(
             "joblib is required for the voice quality classifier. "
-            "Install with: pip install ralph-tts[validation]"
+            "Install with: pip install rho-tts[validation]"
         )
 
     if model_path is None:
         model_path = os.environ.get(
-            "RALPH_TTS_CLASSIFIER_MODEL",
+            "RHO_TTS_CLASSIFIER_MODEL",
             os.path.join(os.path.dirname(__file__), "voice_quality_model.pkl"),
         )
 
@@ -40,7 +40,7 @@ def _load_model(model_path: Optional[str] = None):
         logger.warning(
             f"Voice quality model not found at {model_path}. "
             f"Accent drift validation will be unavailable. "
-            f"Set RALPH_TTS_CLASSIFIER_MODEL env var or train a model with the trainer module."
+            f"Set RHO_TTS_CLASSIFIER_MODEL env var or train a model with the trainer module."
         )
         return
 

@@ -59,7 +59,7 @@ class TTSFactory:
                 f"Unknown TTS provider: '{provider}'. "
                 f"Available providers: {available}. "
                 f"Make sure the provider's dependencies are installed "
-                f"(e.g., pip install ralph-tts[qwen])"
+                f"(e.g., pip install rho-tts[qwen])"
             )
 
         tts_class = cls._providers[provider]

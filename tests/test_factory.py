@@ -3,8 +3,8 @@
 import pytest
 import torch
 
-from ralph_tts.base_tts import BaseTTS
-from ralph_tts.factory import TTSFactory
+from rho_tts.base_tts import BaseTTS
+from rho_tts.factory import TTSFactory
 
 
 class MockTTS(BaseTTS):
