@@ -51,7 +51,7 @@ class QwenTTS(BaseTTS):
         speaker: Optional[str] = None,
         language: str = "English",
         model_path: str = "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
-        max_chars_per_text: int = 6000,
+        max_chars_per_text: int = 1000,
         batch_size: int = 5,
         max_iterations: int = 10,
         accent_drift_threshold: float = 0.17,
@@ -74,6 +74,7 @@ class QwenTTS(BaseTTS):
         # Configurable thresholds
         self.MAX_CHARS_PER_TEXT = max_chars_per_text
         self.BATCH_SIZE = batch_size
+        self.force_sentence_split = False
         self.MAX_ITERATIONS = max_iterations
         self.ACCENT_DRIFT_THRESHOLD = accent_drift_threshold
         self.TEXT_SIMILARITY_THRESHOLD = text_similarity_threshold
@@ -168,17 +169,17 @@ class QwenTTS(BaseTTS):
                 speaker=self.speaker,
                 language=self.language,
             )
+        elif is_custom_voice:
+            raise ValueError(
+                "CustomVoice model requires a named speaker. "
+                "Select a built-in voice (e.g. Vivian, Ryan) or provide reference audio with a Base model for voice cloning."
+            )
         elif self.voice_cloning:
             wavs, sr = model.generate_voice_clone(
                 text=text_list,
                 language=self.language,
                 ref_audio=self.reference_audio_path,
                 ref_text=self.reference_text,
-            )
-        elif is_custom_voice:
-            raise ValueError(
-                "CustomVoice model requires a named speaker. "
-                "Select a built-in voice (e.g. Vivian, Ryan) or provide reference audio for voice cloning."
             )
         else:
             raise ValueError(
@@ -263,6 +264,96 @@ class QwenTTS(BaseTTS):
 
         return has_decay, energy_ratio
 
+    def _generate_validated_segment(
+        self, text: str, item_idx: int, seg_idx: int, token: CancellationToken
+    ) -> Optional[torch.Tensor]:
+        """Generate and validate audio for a single text segment.
+
+        Runs the validation-retry loop up to MAX_ITERATIONS times,
+        returning the best audio tensor or None if generation fails entirely.
+        """
+        best_audio = None
+        best_drift = float('inf')
+
+        for iteration in range(self.MAX_ITERATIONS):
+            if token.is_cancelled():
+                raise CancelledException(f"Cancelled during iteration {iteration}")
+
+            try:
+                audio_tensor = self._generate_audio(text)
+                audio_tensor = self._normalize_audio_for_voice(audio_tensor)
+
+                temp_path = None
+                try:
+                    temp_path = f"/tmp/rho_tts_validate_{item_idx}_{seg_idx}_{iteration}.wav"
+                    segment_wav = audio_tensor.cpu() if audio_tensor.device.type != 'cpu' else audio_tensor
+                    if segment_wav.dim() == 1:
+                        segment_wav = segment_wav.unsqueeze(0)
+                    ta.save(temp_path, segment_wav, self.qwen3_sr)
+
+                    # Validation 1: Accent drift
+                    drift_prob, is_voice_accurate = self._validate_accent_drift(temp_path)
+
+                    # Validation 2: Text matching
+                    is_text_accurate = True
+                    text_similarity = 1.0
+
+                    if is_voice_accurate:
+                        is_text_accurate, text_similarity, _ = self._validate_text_match(temp_path, text)
+
+                    is_valid = is_voice_accurate and is_text_accurate
+
+                    if drift_prob is not None and drift_prob < best_drift:
+                        best_drift = drift_prob
+                        best_audio = audio_tensor.clone()
+
+                    if is_valid:
+                        logger.info(
+                            f"  Segment {seg_idx + 1} PASSED "
+                            f"(drift={drift_prob:.3f}, text={text_similarity:.3f})"
+                        )
+                        return audio_tensor
+                    else:
+                        reasons = []
+                        if not is_voice_accurate:
+                            reasons.append(f"drift={drift_prob:.3f}")
+                        if not is_text_accurate:
+                            reasons.append(f"text={text_similarity:.3f}")
+                        logger.warning(
+                            f"  Segment {seg_idx + 1} FAILED iteration {iteration + 1} "
+                            f"({', '.join(reasons)}), best_drift={best_drift:.3f}"
+                        )
+
+                except Exception as e:
+                    logger.warning(f"  Segment {seg_idx + 1}: Error during validation ({e})")
+                finally:
+                    if temp_path and os.path.exists(temp_path):
+                        try:
+                            os.remove(temp_path)
+                        except OSError:
+                            pass
+
+                del audio_tensor
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+            except ValueError:
+                raise  # Config error — don't retry
+            except RuntimeError as e:
+                if "out of memory" in str(e).lower() or "length" in str(e).lower():
+                    logger.error(f"Segment {seg_idx + 1} OOM: {e}")
+                else:
+                    raise
+            except Exception as e:
+                logger.warning(f"Segment {seg_idx + 1}: Error ({e})")
+
+        if best_audio is not None:
+            logger.warning(
+                f"Segment {seg_idx + 1}: Max iterations reached, "
+                f"returning best audio (drift={best_drift:.3f})"
+            )
+        return best_audio
+
     def generate(
         self,
         texts: List[str],
@@ -270,7 +361,11 @@ class QwenTTS(BaseTTS):
         cancellation_token: Optional[CancellationToken] = None,
     ) -> Optional[List[str]]:
         """
-        Generate TTS audio with batch processing and quality validation.
+        Generate TTS audio with text splitting, validation, and segment joining.
+
+        Long texts are split into segments at natural break points, each segment
+        is generated and validated independently, then segments are joined with
+        crossfading via _smooth_segment_join().
 
         Args:
             texts: List of text strings to generate audio for
@@ -288,138 +383,57 @@ class QwenTTS(BaseTTS):
             logger.info(f"Generating audio for {len(mapped_texts)} text item(s) with Qwen3-TTS...")
 
             for idx, text in enumerate(mapped_texts):
-                if len(text) > self.MAX_CHARS_PER_TEXT:
-                    logger.warning(
-                        f"Text item {idx} is long ({len(text)} chars, limit ~{self.MAX_CHARS_PER_TEXT}). May fail."
-                    )
-
-            # Validation loop
-            best_audios = [None] * len(mapped_texts)
-            best_drifts = [float('inf')] * len(mapped_texts)
-            passed_items = [False] * len(mapped_texts)
-
-            for iteration in range(self.MAX_ITERATIONS):
                 if token.is_cancelled():
-                    raise CancelledException(f"Cancelled during iteration {iteration}")
+                    raise CancelledException(f"Cancelled during text item {idx}")
 
-                failed_count = len([p for p in passed_items if not p])
-                logger.info(f"Iteration {iteration + 1}/{self.MAX_ITERATIONS} - {failed_count} item(s) remaining...")
+                # Split long text into segments
+                segments = self._split_text_into_segments(text, self.MAX_CHARS_PER_TEXT)
+                logger.info(f"Text item {idx + 1}: {len(text)} chars -> {len(segments)} segment(s)")
 
-                failed_indices = [idx for idx in range(len(mapped_texts)) if not passed_items[idx]]
-
-                if not failed_indices:
-                    break
-
-                for batch_start in range(0, len(failed_indices), self.BATCH_SIZE):
-                    batch_end = min(batch_start + self.BATCH_SIZE, len(failed_indices))
-                    items_to_generate = failed_indices[batch_start:batch_end]
-
+                audio_segments = []
+                for seg_idx, segment in enumerate(segments):
                     if token.is_cancelled():
-                        raise CancelledException(f"Cancelled before batch {batch_start}-{batch_end}")
+                        raise CancelledException(f"Cancelled during segment {seg_idx + 1} of item {idx + 1}")
 
-                    try:
-                        batch_texts = [mapped_texts[idx] for idx in items_to_generate]
-                        audio_tensors = self._generate_audio(batch_texts)
+                    logger.info(f"  Segment {seg_idx + 1}/{len(segments)} ({len(segment)} chars)")
+                    audio = self._generate_validated_segment(segment, idx, seg_idx, token)
+                    if audio is not None:
+                        audio_segments.append(audio)
+                    else:
+                        logger.error(f"  Segment {seg_idx + 1} failed to generate")
 
-                        for local_idx, global_idx in enumerate(items_to_generate):
-                            if token.is_cancelled():
-                                raise CancelledException(f"Cancelled during validation of item {global_idx}")
+                if not audio_segments:
+                    logger.error(f"Item {idx + 1} failed: no segments generated")
+                    output_files.append(None)
+                    continue
 
-                            audio_tensor = audio_tensors[local_idx]
-                            audio_tensor = self._normalize_audio_for_voice(audio_tensor)
-
-                            temp_path = None
-
-                            try:
-                                temp_path = f"/tmp/rho_tts_validate_{global_idx}_{iteration}.wav"
-                                segment_wav = audio_tensor.cpu() if audio_tensor.device.type != 'cpu' else audio_tensor
-                                if segment_wav.dim() == 1:
-                                    segment_wav = segment_wav.unsqueeze(0)
-                                ta.save(temp_path, segment_wav, self.qwen3_sr)
-
-                                # Validation 1: Accent drift
-                                drift_prob, is_voice_accurate = self._validate_accent_drift(temp_path)
-
-                                # Validation 2: Text matching
-                                is_text_accurate = True
-                                text_similarity = 1.0
-
-                                if is_voice_accurate:
-                                    is_text_accurate, text_similarity, _ = self._validate_text_match(
-                                        temp_path, batch_texts[local_idx]
-                                    )
-
-                                is_valid = is_voice_accurate and is_text_accurate
-
-                                if drift_prob is not None and drift_prob < best_drifts[global_idx]:
-                                    best_drifts[global_idx] = drift_prob
-                                    best_audios[global_idx] = audio_tensor.clone()
-
-                                if is_valid:
-                                    logger.info(
-                                        f"  Item {global_idx + 1}: PASSED "
-                                        f"(drift={drift_prob:.3f}, text={text_similarity:.3f})"
-                                    )
-                                    passed_items[global_idx] = True
-                                else:
-                                    reasons = []
-                                    if not is_voice_accurate:
-                                        reasons.append(f"drift={drift_prob:.3f}")
-                                    if not is_text_accurate:
-                                        reasons.append(f"text={text_similarity:.3f}")
-                                    logger.warning(
-                                        f"  Item {global_idx + 1}: FAILED ({', '.join(reasons)}), "
-                                        f"best_drift={best_drifts[global_idx]:.3f}"
-                                    )
-
-                            except Exception as e:
-                                logger.warning(f"  Item {global_idx + 1}: Error during validation ({e})")
-                            finally:
-                                if temp_path and os.path.exists(temp_path):
-                                    try:
-                                        os.remove(temp_path)
-                                    except OSError:
-                                        pass
-
-                        del audio_tensors
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
-
-                    except ValueError:
-                        raise  # Config error — don't retry
-                    except RuntimeError as e:
-                        if "out of memory" in str(e).lower() or "length" in str(e).lower():
-                            logger.error(f"Batch {batch_start}-{batch_end} OOM: {e}")
-                        else:
-                            raise
-                    except Exception as e:
-                        logger.warning(f"Batch {batch_start}-{batch_end}: Error ({e})")
-
-            # Save final audio
-            for idx in range(len(mapped_texts)):
-                if best_audios[idx] is not None:
-                    try:
-                        output_path = f"{output_base_path}_{idx}.wav"
-                        audio = best_audios[idx]
-                        final_wav = audio.cpu() if audio.device.type != 'cpu' else audio
-                        if final_wav.dim() == 1:
-                            final_wav = final_wav.unsqueeze(0)
-                        ta.save(output_path, final_wav, self.qwen3_sr)
-                        output_files.append(output_path)
-
-                        status = "PASSED" if passed_items[idx] else f"BEST (drift={best_drifts[idx]:.3f})"
-                        logger.info(f"Item {idx + 1} saved: {output_path} [{status}]")
-
-                        best_audios[idx] = None
-                        del final_wav
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
-
-                    except Exception as e:
-                        logger.error(f"Failed to save audio for item {idx}: {e}")
-                        output_files.append(None)
+                # Join segments with crossfading
+                if len(audio_segments) > 1:
+                    final_audio = self._smooth_segment_join(audio_segments)
                 else:
-                    logger.error(f"Item {idx + 1} failed to generate")
+                    final_audio = audio_segments[0]
+
+                if final_audio is None:
+                    logger.error(f"Item {idx + 1} failed: segment join returned None")
+                    output_files.append(None)
+                    continue
+
+                # Save
+                try:
+                    output_path = f"{output_base_path}_{idx}.wav"
+                    final_wav = final_audio.cpu() if final_audio.device.type != 'cpu' else final_audio
+                    if final_wav.dim() == 1:
+                        final_wav = final_wav.unsqueeze(0)
+                    ta.save(output_path, final_wav, self.qwen3_sr)
+                    output_files.append(output_path)
+                    logger.info(f"Item {idx + 1} saved: {output_path}")
+
+                    del final_wav, final_audio
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+                except Exception as e:
+                    logger.error(f"Failed to save audio for item {idx}: {e}")
                     output_files.append(None)
 
             successful = sum(1 for f in output_files if f is not None)

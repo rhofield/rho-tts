@@ -69,6 +69,18 @@ def generate_audio(
             "Add a custom voice with reference audio, or switch to a CustomVoice model."
         )
 
+    # Validate: Qwen CustomVoice models need a named speaker, not reference audio.
+    if (
+        model_cfg.provider == "qwen"
+        and _is_custom_voice_model(model_cfg)
+        and voice_cfg is not None
+        and not voice_cfg.speaker
+    ):
+        return None, (
+            "This CustomVoice model requires a built-in speaker voice (e.g. Vivian, Ryan). "
+            "Voice cloning with reference audio is only supported on Base models."
+        )
+
     try:
         tts = state.get_or_create_tts(model_cfg, voice_cfg)
     except Exception as e:

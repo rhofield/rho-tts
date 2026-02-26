@@ -114,8 +114,9 @@ class BaseTTS(ABC):
         try:
             from .validation.classifier import predict_accent_drift_probability
             drift_prob = predict_accent_drift_probability(audio_path)
-            is_ok = drift_prob is not None and drift_prob < self.ACCENT_DRIFT_THRESHOLD
-            return (drift_prob if drift_prob is not None else 0.0), is_ok
+            if drift_prob is None:
+                return 0.0, True
+            return drift_prob, drift_prob < self.ACCENT_DRIFT_THRESHOLD
         except ImportError:
             logger.debug("Accent drift classifier not available, skipping validation")
             return 0.0, True
