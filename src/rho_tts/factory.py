@@ -13,11 +13,17 @@ class TTSFactory:
     """Factory for creating TTS provider instances."""
 
     _providers: Dict[str, Type[BaseTTS]] = {}
+    _isolated_providers: set[str] = set()
     _default_providers_registered = False
 
     @classmethod
     def _register_default_providers(cls):
-        """Register built-in providers on first use."""
+        """Register built-in providers on first use.
+
+        Providers whose dependencies aren't available are added to
+        ``_isolated_providers`` — they'll be run in an auto-managed
+        venv via ``ProviderProxy``.
+        """
         if cls._default_providers_registered:
             return
         cls._default_providers_registered = True
@@ -26,13 +32,13 @@ class TTSFactory:
             from .providers.qwen import QwenTTS
             cls._providers["qwen"] = QwenTTS
         except ImportError:
-            pass
+            cls._isolated_providers.add("qwen")
 
         try:
             from .providers.chatterbox import ChatterboxTTS
             cls._providers["chatterbox"] = ChatterboxTTS
         except ImportError:
-            pass
+            cls._isolated_providers.add("chatterbox")
 
     @classmethod
     def get_tts_instance(cls, provider: str = "qwen", **kwargs) -> BaseTTS:
@@ -51,17 +57,23 @@ class TTSFactory:
         """
         cls._register_default_providers()
 
-        if provider not in cls._providers:
-            available = ", ".join(cls._providers.keys()) if cls._providers else "(none registered)"
-            raise ValueError(
-                f"Unknown TTS provider: '{provider}'. "
-                f"Available providers: {available}. "
-                f"Make sure the provider's dependencies are installed "
-                f"(e.g., pip install rho-tts[qwen])"
-            )
+        # Direct import available — fast path
+        if provider in cls._providers:
+            tts_class = cls._providers[provider]
+            return tts_class(**kwargs)
 
-        tts_class = cls._providers[provider]
-        return tts_class(**kwargs)
+        # Deps not locally available — delegate to isolated venv
+        if provider in cls._isolated_providers:
+            from .isolation import ProviderProxy
+            return ProviderProxy(provider, **kwargs)
+
+        available = ", ".join(cls.list_providers()) or "(none registered)"
+        raise ValueError(
+            f"Unknown TTS provider: '{provider}'. "
+            f"Available providers: {available}. "
+            f"Make sure the provider's dependencies are installed "
+            f"(e.g., pip install rho-tts[qwen])"
+        )
 
     @classmethod
     def register_provider(cls, name: str, provider_class: Type[BaseTTS]):
@@ -81,6 +93,6 @@ class TTSFactory:
 
     @classmethod
     def list_providers(cls) -> list[str]:
-        """Get list of available TTS provider names."""
+        """Get list of available TTS provider names (including isolated)."""
         cls._register_default_providers()
-        return list(cls._providers.keys())
+        return sorted(set(cls._providers.keys()) | cls._isolated_providers)

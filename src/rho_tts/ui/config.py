@@ -36,9 +36,9 @@ PROVIDER_MODELS: dict[str, list[dict]] = {
             },
         },
         {
-            "display_name": "Qwen3-TTS 0.5B Base",
+            "display_name": "Qwen3-TTS 0.6B Base",
             "defaults": {
-                "model_path": "Qwen/Qwen3-TTS-12Hz-0.5B-Base",
+                "model_path": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
                 "max_iterations": 10,
                 "accent_drift_threshold": 0.17,
                 "text_similarity_threshold": 0.85,
@@ -54,9 +54,9 @@ PROVIDER_MODELS: dict[str, list[dict]] = {
             },
         },
         {
-            "display_name": "Qwen3-TTS 0.5B CustomVoice",
+            "display_name": "Qwen3-TTS 0.6B CustomVoice",
             "defaults": {
-                "model_path": "Qwen/Qwen3-TTS-12Hz-0.5B-CustomVoice",
+                "model_path": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
                 "max_iterations": 10,
                 "accent_drift_threshold": 0.17,
                 "text_similarity_threshold": 0.85,
@@ -86,6 +86,17 @@ PROVIDER_MODELS: dict[str, list[dict]] = {
 }
 
 
+def is_model_cached(repo_id: str) -> bool:
+    """Check if a HuggingFace model is in the local cache."""
+    try:
+        from huggingface_hub import try_to_load_from_cache
+
+        result = try_to_load_from_cache(repo_id, "config.json")
+        return isinstance(result, str)
+    except Exception:
+        return False
+
+
 def get_provider_model_choices(provider: str) -> list[str]:
     """Return display names for all models under a provider."""
     return [m["display_name"] for m in PROVIDER_MODELS.get(provider, [])]
@@ -107,6 +118,8 @@ class VoiceProfile:
     reference_text: Optional[str] = None
     speaker: Optional[str] = None
     provider: Optional[str] = None  # set on builtins; None = works with any provider
+    description: Optional[str] = None
+    language: str = "English"
 
     def to_dict(self) -> dict:
         d = {
@@ -117,6 +130,10 @@ class VoiceProfile:
         }
         if self.speaker is not None:
             d["speaker"] = self.speaker
+        if self.description is not None:
+            d["description"] = self.description
+        if self.language != "English":
+            d["language"] = self.language
         return d
 
     @classmethod
@@ -127,6 +144,8 @@ class VoiceProfile:
             reference_audio=data.get("reference_audio"),
             reference_text=data.get("reference_text"),
             speaker=data.get("speaker"),
+            description=data.get("description"),
+            language=data.get("language", "English"),
         )
 
 
@@ -134,19 +153,28 @@ class VoiceProfile:
 # Built-in voices — available without user-uploaded reference audio
 # ---------------------------------------------------------------------------
 
-_QWEN_CUSTOM_SPEAKERS = [
-    "Vivian", "Serena", "Uncle_Fu", "Dylan", "Eric",
-    "Ryan", "Aiden", "Ono_Anna", "Sohee",
+_QWEN_CUSTOM_SPEAKERS: list[dict] = [
+    {"name": "Vivian", "language": "Chinese", "description": "Bright, slightly edgy young female voice"},
+    {"name": "Serena", "language": "Chinese", "description": "Warm, gentle young female voice"},
+    {"name": "Uncle_Fu", "language": "Chinese", "description": "Seasoned male voice with a low, mellow timbre"},
+    {"name": "Dylan", "language": "Chinese", "description": "Youthful Beijing male voice, clear and natural"},
+    {"name": "Eric", "language": "Chinese", "description": "Lively Chengdu male voice, slightly husky"},
+    {"name": "Ryan", "language": "English", "description": "Dynamic male voice with strong rhythmic drive"},
+    {"name": "Aiden", "language": "English", "description": "Sunny American male voice with a clear midrange"},
+    {"name": "Ono_Anna", "language": "Japanese", "description": "Playful Japanese female voice, light and nimble"},
+    {"name": "Sohee", "language": "Korean", "description": "Warm Korean female voice with rich emotion"},
 ]
 
 BUILTIN_VOICES: List[VoiceProfile] = [
     VoiceProfile(id="builtin:chatterbox_default", name="Chatterbox Default", provider="chatterbox"),
     *(
         VoiceProfile(
-            id=f"builtin:qwen_{s.lower()}",
-            name=f"Qwen — {s}",
-            speaker=s,
+            id=f"builtin:qwen_{s['name'].lower()}",
+            name=f"Qwen — {s['name']}",
+            speaker=s["name"],
             provider="qwen",
+            description=s["description"],
+            language=s["language"],
         )
         for s in _QWEN_CUSTOM_SPEAKERS
     ),

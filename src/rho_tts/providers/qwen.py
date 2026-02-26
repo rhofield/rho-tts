@@ -49,6 +49,7 @@ class QwenTTS(BaseTTS):
         reference_audio: Optional[str] = None,
         reference_text: Optional[str] = None,
         speaker: Optional[str] = None,
+        language: str = "English",
         model_path: str = "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
         max_chars_per_text: int = 6000,
         batch_size: int = 5,
@@ -66,6 +67,7 @@ class QwenTTS(BaseTTS):
         self.reference_audio_path = reference_audio
         self.reference_text = reference_text
         self.speaker = speaker
+        self.language = language
         self.voice_cloning = reference_audio is not None
         self.model_path = model_path
 
@@ -158,20 +160,25 @@ class QwenTTS(BaseTTS):
         is_single = isinstance(text, str)
         text_list = [text] if is_single else text
 
-        model_type = getattr(model.model, "tts_model_type", "base")
+        is_custom_voice = "CustomVoice" in self.model_path
 
-        if model_type == "custom_voice" and self.speaker:
+        if is_custom_voice and self.speaker:
             wavs, sr = model.generate_custom_voice(
                 text=text_list,
                 speaker=self.speaker,
-                language="English",
+                language=self.language,
             )
         elif self.voice_cloning:
             wavs, sr = model.generate_voice_clone(
                 text=text_list,
-                language="English",
+                language=self.language,
                 ref_audio=self.reference_audio_path,
                 ref_text=self.reference_text,
+            )
+        elif is_custom_voice:
+            raise ValueError(
+                "CustomVoice model requires a named speaker. "
+                "Select a built-in voice (e.g. Vivian, Ryan) or provide reference audio for voice cloning."
             )
         else:
             raise ValueError(
@@ -378,6 +385,8 @@ class QwenTTS(BaseTTS):
                         if torch.cuda.is_available():
                             torch.cuda.empty_cache()
 
+                    except ValueError:
+                        raise  # Config error — don't retry
                     except RuntimeError as e:
                         if "out of memory" in str(e).lower() or "length" in str(e).lower():
                             logger.error(f"Batch {batch_start}-{batch_end} OOM: {e}")

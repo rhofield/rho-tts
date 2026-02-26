@@ -22,6 +22,7 @@ from .config import (
     get_builtin_voice,
     get_phonetic_key,
     get_provider_model_defaults,
+    is_model_cached,
 )
 from .state import AppState
 
@@ -56,6 +57,17 @@ def generate_audio(
 
     if model_cfg is None:
         return None, f"Model '{model_id}' not found in config."
+
+    # Validate: Qwen Base models need reference audio (voice cloning).
+    if (
+        model_cfg.provider == "qwen"
+        and not _is_custom_voice_model(model_cfg)
+        and (voice_cfg is None or voice_cfg.reference_audio is None)
+    ):
+        return None, (
+            "This Qwen Base model requires a voice with reference audio. "
+            "Add a custom voice with reference audio, or switch to a CustomVoice model."
+        )
 
     try:
         tts = state.get_or_create_tts(model_cfg, voice_cfg)
@@ -225,6 +237,7 @@ def add_model(
     max_iterations: Optional[int],
     accent_drift_threshold: Optional[float],
     text_similarity_threshold: Optional[float],
+    custom_name: Optional[str] = None,
 ) -> tuple[list[list[str]], str]:
     """
     Add a model configuration from the provider catalog.
@@ -240,13 +253,17 @@ def add_model(
     if not model_name:
         return _models_table(state.config), "Please select a model."
 
-    # Check for duplicate: same provider + model name already saved
-    for existing in state.config.models.values():
-        if existing.provider == provider and existing.name == model_name:
-            return _models_table(state.config), f"'{model_name}' is already added."
-
     # Start from catalog defaults, then override thresholds
     params = get_provider_model_defaults(provider, model_name)
+
+    # Identity-based duplicate check: compare model_path (Qwen) or implementation (Chatterbox)
+    identity_key = params.get("model_path") or params.get("implementation")
+    if identity_key:
+        for existing in state.config.models.values():
+            existing_identity = existing.params.get("model_path") or existing.params.get("implementation")
+            if existing.provider == provider and existing_identity == identity_key:
+                return _models_table(state.config), f"This model is already added as '{existing.name}'."
+
     if max_iterations is not None and max_iterations > 0:
         params["max_iterations"] = int(max_iterations)
     if accent_drift_threshold is not None:
@@ -254,11 +271,12 @@ def add_model(
     if text_similarity_threshold is not None:
         params["text_similarity_threshold"] = float(text_similarity_threshold)
 
+    display_name = custom_name.strip() if custom_name and custom_name.strip() else model_name
     model_id = uuid.uuid4().hex[:12]
 
     model_cfg = ModelConfig(
         id=model_id,
-        name=model_name,
+        name=display_name,
         provider=provider,
         params=params,
     )
@@ -266,7 +284,7 @@ def add_model(
     state.save()
     state.invalidate_tts()
 
-    return _models_table(state.config), f"Model '{model_name}' added."
+    return _models_table(state.config), f"Model '{display_name}' added."
 
 
 def delete_model(state: AppState, model_id: str) -> tuple[list[list[str]], str]:
@@ -286,6 +304,27 @@ def delete_model(state: AppState, model_id: str) -> tuple[list[list[str]], str]:
     return _models_table(state.config), f"Deleted model '{model_cfg.name}'."
 
 
+def download_model(provider: str, model_name: str) -> tuple[str, dict]:
+    """Download a HuggingFace model to the local cache.
+
+    Returns:
+        (status_message, download_button_update)
+    """
+    import gradio as gr
+
+    defaults = get_provider_model_defaults(provider, model_name)
+    model_path = defaults.get("model_path")
+    if not model_path:
+        return "No download needed.", gr.Button(visible=False)
+    try:
+        from huggingface_hub import snapshot_download
+
+        snapshot_download(model_path)
+        return "Downloaded", gr.Button(visible=False)
+    except Exception as e:
+        return f"Download failed: {e}", gr.Button(visible=True)
+
+
 def _models_table(config: AppConfig) -> list[list[str]]:
     """Build the models table data for Gradio Dataframe."""
     return [
@@ -298,14 +337,44 @@ def _models_table(config: AppConfig) -> list[list[str]]:
 # Dropdown helpers
 # ---------------------------------------------------------------------------
 
+def _voice_display_label(v: VoiceProfile) -> str:
+    """Build a display label for a voice, appending its description if present."""
+    if v.description:
+        return f"{v.name} — {v.description}"
+    return v.name
+
+
 def voice_choices(config: AppConfig) -> list[tuple[str, str]]:
     """Return (display_label, value) pairs for voice dropdown.
 
     Built-in voices appear first, followed by user-created voices.
     """
-    builtin = [(v.name, v.id) for v in BUILTIN_VOICES]
-    user = [(v.name, v.id) for v in config.voices.values()]
+    builtin = [(_voice_display_label(v), v.id) for v in BUILTIN_VOICES]
+    user = [(_voice_display_label(v), v.id) for v in config.voices.values()]
     return builtin + user
+
+
+def _is_custom_voice_model(model_cfg: ModelConfig) -> bool:
+    """Check whether a model config refers to a Qwen CustomVoice model."""
+    model_path = model_cfg.params.get("model_path", "")
+    return "CustomVoice" in model_path
+
+
+def status_for_model_voice(
+    config: AppConfig, model_id: Optional[str], voice_choices: list
+) -> str:
+    """Return a proactive status message when no compatible voices exist."""
+    if not model_id or voice_choices:
+        return ""
+    model_cfg = config.models.get(model_id)
+    if model_cfg is None:
+        return ""
+    if model_cfg.provider == "qwen" and not _is_custom_voice_model(model_cfg):
+        return (
+            "This Qwen Base model requires voice cloning — add a custom voice "
+            "with reference audio in the Voices tab, or switch to a CustomVoice model."
+        )
+    return ""
 
 
 def voice_choices_for_model(
@@ -314,8 +383,10 @@ def voice_choices_for_model(
     """Return voice choices filtered by the selected model's provider.
 
     Built-in voices are filtered to only those matching the model's
-    provider. User-created voices (provider=None) are always included
-    since they carry reference audio usable by any provider.
+    provider. For Qwen Base models, built-in speaker voices are excluded
+    because they require a CustomVoice model. User-created voices
+    (provider=None) are always included since they carry reference audio
+    usable by any provider.
     """
     if not model_id:
         return voice_choices(config)
@@ -325,8 +396,15 @@ def voice_choices_for_model(
         return voice_choices(config)
 
     provider = model_cfg.provider
-    builtin = [(v.name, v.id) for v in BUILTIN_VOICES if v.provider == provider]
-    user = [(v.name, v.id) for v in config.voices.values()]
+
+    # Qwen Base models only support voice cloning via reference audio,
+    # so hide built-in named-speaker voices (they have no reference audio).
+    if provider == "qwen" and not _is_custom_voice_model(model_cfg):
+        builtin = []
+    else:
+        builtin = [(_voice_display_label(v), v.id) for v in BUILTIN_VOICES if v.provider == provider]
+
+    user = [(_voice_display_label(v), v.id) for v in config.voices.values()]
     return builtin + user
 
 

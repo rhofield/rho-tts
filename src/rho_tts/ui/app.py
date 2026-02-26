@@ -15,7 +15,7 @@ from typing import Optional
 import gradio as gr
 
 from . import callbacks
-from .config import PROVIDER_MODELS, get_provider_model_choices, load_config
+from .config import PROVIDER_MODELS, get_provider_model_choices, get_provider_model_defaults, is_model_cached, load_config
 from .state import AppState
 
 logger = logging.getLogger(__name__)
@@ -55,13 +55,17 @@ def _build_app(state: AppState) -> gr.Blocks:
             with gr.Row():
                 # -- Config sidebar --
                 with gr.Column(scale=1, min_width=260):
+                    _model_list = callbacks.model_choices(state.config)
+                    _initial_model_id = _model_list[0][1] if _model_list else None
                     model_dd = gr.Dropdown(
-                        choices=callbacks.model_choices(state.config),
+                        choices=_model_list,
+                        value=_initial_model_id,
                         label="Model",
                         interactive=True,
                     )
+                    _initial_voice_choices = callbacks.voice_choices_for_model(state.config, _initial_model_id)
                     voice_dd = gr.Dropdown(
-                        choices=callbacks.voice_choices(state.config),
+                        choices=_initial_voice_choices,
                         label="Voice",
                         interactive=True,
                     )
@@ -76,7 +80,10 @@ def _build_app(state: AppState) -> gr.Blocks:
                     with gr.Row():
                         gen_btn = gr.Button("Generate", variant="primary")
                         cancel_btn = gr.Button("Cancel", variant="stop")
-                    status_box = gr.Textbox(label="Status", interactive=False)
+                    _initial_status = callbacks.status_for_model_voice(
+                        state.config, _initial_model_id, _initial_voice_choices,
+                    )
+                    status_box = gr.Textbox(label="Status", interactive=False, value=_initial_status)
                     audio_out = gr.Audio(label="Generated Audio", type="filepath")
 
             # -- Phonetic mapping accordion --
@@ -115,10 +122,12 @@ def _build_app(state: AppState) -> gr.Blocks:
                 rows, label = callbacks.load_phonetic_mapping(
                     state, new_voice_id, model_id,
                 )
+                status = callbacks.status_for_model_voice(state.config, model_id, choices)
                 return (
                     gr.Dropdown(choices=choices, value=new_voice_id),
                     rows,
                     label,
+                    status,
                 )
 
             voice_dd.change(
@@ -129,7 +138,7 @@ def _build_app(state: AppState) -> gr.Blocks:
             model_dd.change(
                 fn=_on_model_change,
                 inputs=[voice_dd, model_dd],
-                outputs=[voice_dd, mapping_df, mapping_label],
+                outputs=[voice_dd, mapping_df, mapping_label, status_box],
             )
 
             def _generate(model_id, voice_id, text):
@@ -190,22 +199,30 @@ def _build_app(state: AppState) -> gr.Blocks:
 
             def _add_voice(vid, vname, vaudio, vref, current_model_id):
                 table, msg = callbacks.add_voice(state, vid, vname, vaudio, vref)
-                return table, msg, _voice_choices(current_model_id), _model_choices()
+                new_voice_dd = _voice_choices(current_model_id)
+                status = callbacks.status_for_model_voice(
+                    state.config, current_model_id, new_voice_dd.choices,
+                )
+                return table, msg, new_voice_dd, _model_choices(), status
 
             v_add_btn.click(
                 fn=_add_voice,
                 inputs=[v_id, v_name, v_audio, v_ref_text, model_dd],
-                outputs=[v_table, v_status, voice_dd, model_dd],
+                outputs=[v_table, v_status, voice_dd, model_dd, status_box],
             )
 
             def _del_voice(vid, current_model_id):
                 table, msg = callbacks.delete_voice(state, vid)
-                return table, msg, _voice_choices(current_model_id), _model_choices()
+                new_voice_dd = _voice_choices(current_model_id)
+                status = callbacks.status_for_model_voice(
+                    state.config, current_model_id, new_voice_dd.choices,
+                )
+                return table, msg, new_voice_dd, _model_choices(), status
 
             v_del_btn.click(
                 fn=_del_voice,
                 inputs=[v_del_id, model_dd],
-                outputs=[v_table, v_status, voice_dd, model_dd],
+                outputs=[v_table, v_status, voice_dd, model_dd, status_box],
             )
 
         # ── Tab 3: Models ───────────────────────────────────────────
@@ -222,6 +239,18 @@ def _build_app(state: AppState) -> gr.Blocks:
                 label="Model",
                 interactive=True,
             )
+            m_name = gr.Textbox(
+                label="Model Name",
+                placeholder="(uses catalog name)",
+                info="Optional friendly name for this model configuration",
+            )
+            with gr.Row():
+                m_download_status = gr.Textbox(
+                    label="Download Status", interactive=False, visible=False,
+                )
+                m_download_btn = gr.Button(
+                    "Download Model", variant="secondary", visible=False,
+                )
 
             with gr.Accordion("Parameters", open=False):
                 m_max_iter = gr.Number(label="max_iterations", value=10, precision=0)
@@ -258,37 +287,72 @@ def _build_app(state: AppState) -> gr.Blocks:
             def _on_provider_change(provider):
                 choices = get_provider_model_choices(provider) if provider else []
                 logger.info("Provider changed to %r, model choices: %s", provider, choices)
-                return gr.Dropdown(choices=choices, value=None, interactive=True)
+                return (
+                    gr.Dropdown(choices=choices, value=None, interactive=True),
+                    gr.Textbox(visible=False),
+                    gr.Button(visible=False),
+                    gr.Textbox(placeholder="(uses catalog name)", value=""),
+                )
 
             m_provider.change(
                 fn=_on_provider_change,
                 inputs=[m_provider],
-                outputs=[m_model_select],
+                outputs=[m_model_select, m_download_status, m_download_btn, m_name],
             )
 
             def _on_model_select_change(provider, model_name):
-                """Fill threshold defaults when a catalog model is selected."""
+                """Fill threshold defaults and check download status when a catalog model is selected."""
                 if not provider or not model_name:
-                    return gr.skip(), gr.skip(), gr.skip()
-                from .config import get_provider_model_defaults
+                    return (
+                        gr.skip(), gr.skip(), gr.skip(),
+                        gr.Textbox(visible=False), gr.Button(visible=False),
+                        gr.Textbox(placeholder="(uses catalog name)"),
+                    )
                 defaults = get_provider_model_defaults(provider, model_name)
+                model_path = defaults.get("model_path")
+
+                # Download status
+                if model_path:
+                    cached = is_model_cached(model_path)
+                    dl_status = gr.Textbox(
+                        value="Downloaded" if cached else "Not downloaded",
+                        visible=True,
+                    )
+                    dl_btn = gr.Button(visible=not cached)
+                else:
+                    dl_status = gr.Textbox(visible=False)
+                    dl_btn = gr.Button(visible=False)
+
                 return (
                     defaults.get("max_iterations", 10),
                     defaults.get("accent_drift_threshold", 0.17),
                     defaults.get("text_similarity_threshold", 0.85),
+                    dl_status,
+                    dl_btn,
+                    gr.Textbox(placeholder=f"(default: {model_name})"),
                 )
 
             m_model_select.change(
                 fn=_on_model_select_change,
                 inputs=[m_provider, m_model_select],
-                outputs=[m_max_iter, m_accent, m_text_sim],
+                outputs=[m_max_iter, m_accent, m_text_sim, m_download_status, m_download_btn, m_name],
+            )
+
+            def _download_model(provider, model_name):
+                return callbacks.download_model(provider, model_name)
+
+            m_download_btn.click(
+                fn=_download_model,
+                inputs=[m_provider, m_model_select],
+                outputs=[m_download_status, m_download_btn],
             )
 
             # -- Model events --
 
-            def _add_model(mprov, mmodel, miter, macc, mtsim, current_model_id):
+            def _add_model(mprov, mmodel, miter, macc, mtsim, mname, current_model_id):
                 table, msg = callbacks.add_model(
                     state, mprov, mmodel, miter, macc, mtsim,
+                    custom_name=mname,
                 )
                 return (
                     table,
@@ -300,7 +364,7 @@ def _build_app(state: AppState) -> gr.Blocks:
 
             m_add_btn.click(
                 fn=_add_model,
-                inputs=[m_provider, m_model_select, m_max_iter, m_accent, m_text_sim, model_dd],
+                inputs=[m_provider, m_model_select, m_max_iter, m_accent, m_text_sim, m_name, model_dd],
                 outputs=[m_table, m_status, model_dd, voice_dd, m_del_dd],
             )
 

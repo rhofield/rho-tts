@@ -66,6 +66,8 @@ class AppState:
             # Tear down previous instance
             if self._active_tts is not None:
                 logger.info(f"Releasing TTS instance for {self._cache_key}")
+                if hasattr(self._active_tts, "shutdown"):
+                    self._active_tts.shutdown()
                 del self._active_tts
                 self._active_tts = None
                 if torch.cuda.is_available():
@@ -90,6 +92,9 @@ class AppState:
                 if voice_profile.speaker:
                     kwargs["speaker"] = voice_profile.speaker
 
+                # Pass language (defaults to English for user-created voices)
+                kwargs["language"] = voice_profile.language
+
                 # Qwen needs reference_text when doing voice cloning
                 if model_config.provider == "qwen" and voice_profile.reference_text:
                     kwargs["reference_text"] = voice_profile.reference_text
@@ -106,6 +111,8 @@ class AppState:
         """Force the next get_or_create_tts call to rebuild."""
         with self._lock:
             if self._active_tts is not None:
+                if hasattr(self._active_tts, "shutdown"):
+                    self._active_tts.shutdown()
                 del self._active_tts
                 self._active_tts = None
                 self._cache_key = None
