@@ -175,7 +175,6 @@ def save_phonetic_mapping(
 
 def add_voice(
     state: AppState,
-    voice_id: str,
     display_name: str,
     audio_path: Optional[str],
     reference_text: str,
@@ -186,13 +185,13 @@ def add_voice(
     Returns:
         (updated_voices_table, status_message)
     """
-    if not voice_id or not voice_id.strip():
-        return _voices_table(state.config), "Voice ID is required."
+    if not display_name or not display_name.strip():
+        return _voices_table(state.config), "Display name is required."
     if not audio_path:
         return _voices_table(state.config), "Reference audio is required."
 
-    voice_id = voice_id.strip()
-    display_name = display_name.strip() if display_name else voice_id
+    voice_id = uuid.uuid4().hex[:12]
+    display_name = display_name.strip()
 
     # Copy audio into managed directory
     try:
@@ -316,6 +315,62 @@ def delete_model(state: AppState, model_id: str) -> tuple[list[list[str]], str]:
     return _models_table(state.config), f"Deleted model '{model_cfg.name}'."
 
 
+def load_model_for_edit(
+    state: AppState, model_id: str,
+) -> tuple[str, int, float, float]:
+    """
+    Load a saved model's current values into the edit form.
+
+    Returns:
+        (name, max_iterations, accent_drift_threshold, text_similarity_threshold)
+    """
+    if not model_id or model_id not in state.config.models:
+        return "", 10, 0.17, 0.85
+
+    cfg = state.config.models[model_id]
+    return (
+        cfg.name,
+        cfg.params.get("max_iterations", 10),
+        cfg.params.get("accent_drift_threshold", 0.17),
+        cfg.params.get("text_similarity_threshold", 0.85),
+    )
+
+
+def edit_model(
+    state: AppState,
+    model_id: str,
+    new_name: Optional[str],
+    max_iterations: Optional[int],
+    accent_drift_threshold: Optional[float],
+    text_similarity_threshold: Optional[float],
+) -> tuple[list[list[str]], str]:
+    """
+    Update an existing saved model's name and parameters.
+
+    Returns:
+        (updated_models_table, status_message)
+    """
+    if not model_id or model_id not in state.config.models:
+        return _models_table(state.config), "Select a model to edit."
+
+    cfg = state.config.models[model_id]
+
+    if new_name and new_name.strip():
+        cfg.name = new_name.strip()
+
+    if max_iterations is not None and max_iterations > 0:
+        cfg.params["max_iterations"] = int(max_iterations)
+    if accent_drift_threshold is not None:
+        cfg.params["accent_drift_threshold"] = float(accent_drift_threshold)
+    if text_similarity_threshold is not None:
+        cfg.params["text_similarity_threshold"] = float(text_similarity_threshold)
+
+    state.save()
+    state.invalidate_tts()
+
+    return _models_table(state.config), f"Model '{cfg.name}' updated."
+
+
 def download_model(provider: str, model_name: str) -> tuple[str, dict]:
     """Download a HuggingFace model to the local cache.
 
@@ -364,6 +419,11 @@ def voice_choices(config: AppConfig) -> list[tuple[str, str]]:
     builtin = [(_voice_display_label(v), v.id) for v in BUILTIN_VOICES]
     user = [(_voice_display_label(v), v.id) for v in config.voices.values()]
     return builtin + user
+
+
+def user_voice_choices(config: AppConfig) -> list[tuple[str, str]]:
+    """Return (display_label, value) pairs for user-created voices only."""
+    return [(_voice_display_label(v), v.id) for v in config.voices.values()]
 
 
 def _is_custom_voice_model(model_cfg: ModelConfig) -> bool:

@@ -41,7 +41,7 @@ def _build_app(state: AppState) -> gr.Blocks:
 
         # ── Tab 1: Generate ─────────────────────────────────────────
 
-        with gr.Tab("Generate"):
+        with gr.Tab("Generate") as generate_tab:
             with gr.Row():
                 gr.Markdown("## rho-tts Studio")
                 device_dd = gr.Dropdown(
@@ -170,11 +170,9 @@ def _build_app(state: AppState) -> gr.Blocks:
 
         # ── Tab 2: Voices ───────────────────────────────────────────
 
-        with gr.Tab("Voices"):
+        with gr.Tab("Voices") as voices_tab:
             gr.Markdown("### Manage Voice Profiles")
-            with gr.Row():
-                v_id = gr.Textbox(label="Voice ID", placeholder="narrator_ryan")
-                v_name = gr.Textbox(label="Display Name", placeholder="Ryan - Narrator")
+            v_name = gr.Textbox(label="Display Name", placeholder="Ryan - Narrator")
             v_audio = gr.Audio(label="Reference Audio", type="filepath")
             v_ref_text = gr.Textbox(
                 label="Reference Text",
@@ -192,23 +190,29 @@ def _build_app(state: AppState) -> gr.Blocks:
                 label="Voice Profiles",
             )
             with gr.Row():
-                v_del_id = gr.Textbox(label="Voice ID to Delete", scale=2)
+                v_del_dd = gr.Dropdown(
+                    choices=callbacks.user_voice_choices(state.config),
+                    label="Voice to Delete",
+                    interactive=True,
+                    scale=2,
+                )
                 v_del_btn = gr.Button("Delete Voice", variant="stop", scale=0, min_width=140)
 
             # -- Voice events --
 
-            def _add_voice(vid, vname, vaudio, vref, current_model_id):
-                table, msg = callbacks.add_voice(state, vid, vname, vaudio, vref)
+            def _add_voice(vname, vaudio, vref, current_model_id):
+                table, msg = callbacks.add_voice(state, vname, vaudio, vref)
                 new_voice_dd = _voice_choices(current_model_id)
                 status = callbacks.status_for_model_voice(
                     state.config, current_model_id, new_voice_dd.choices,
                 )
-                return table, msg, new_voice_dd, _model_choices(), status
+                del_choices = callbacks.user_voice_choices(state.config)
+                return table, msg, new_voice_dd, _model_choices(), status, gr.Dropdown(choices=del_choices)
 
             v_add_btn.click(
                 fn=_add_voice,
-                inputs=[v_id, v_name, v_audio, v_ref_text, model_dd],
-                outputs=[v_table, v_status, voice_dd, model_dd, status_box],
+                inputs=[v_name, v_audio, v_ref_text, model_dd],
+                outputs=[v_table, v_status, voice_dd, model_dd, status_box, v_del_dd],
             )
 
             def _del_voice(vid, current_model_id):
@@ -217,17 +221,18 @@ def _build_app(state: AppState) -> gr.Blocks:
                 status = callbacks.status_for_model_voice(
                     state.config, current_model_id, new_voice_dd.choices,
                 )
-                return table, msg, new_voice_dd, _model_choices(), status
+                del_choices = callbacks.user_voice_choices(state.config)
+                return table, msg, new_voice_dd, _model_choices(), status, gr.Dropdown(choices=del_choices)
 
             v_del_btn.click(
                 fn=_del_voice,
-                inputs=[v_del_id, model_dd],
-                outputs=[v_table, v_status, voice_dd, model_dd, status_box],
+                inputs=[v_del_dd, model_dd],
+                outputs=[v_table, v_status, voice_dd, model_dd, status_box, v_del_dd],
             )
 
         # ── Tab 3: Models ───────────────────────────────────────────
 
-        with gr.Tab("Models"):
+        with gr.Tab("Models") as models_tab:
             gr.Markdown("### Add Model")
             m_provider = gr.Dropdown(
                 choices=list(PROVIDER_MODELS.keys()),
@@ -253,15 +258,16 @@ def _build_app(state: AppState) -> gr.Blocks:
                 )
 
             with gr.Accordion("Parameters", open=False):
-                m_max_iter = gr.Number(label="max_iterations", value=10, precision=0)
-                m_accent = gr.Slider(
-                    label="accent_drift_threshold",
-                    minimum=0, maximum=1, step=0.01, value=0.17,
-                )
-                m_text_sim = gr.Slider(
-                    label="text_similarity_threshold",
-                    minimum=0, maximum=1, step=0.01, value=0.85,
-                )
+                with gr.Accordion("Quality Control", open=True):
+                    m_max_iter = gr.Number(label="max_iterations", value=10, precision=0)
+                    m_accent = gr.Slider(
+                        label="accent_drift_threshold",
+                        minimum=0, maximum=1, step=0.01, value=0.17,
+                    )
+                    m_text_sim = gr.Slider(
+                        label="text_similarity_threshold",
+                        minimum=0, maximum=1, step=0.01, value=0.85,
+                    )
 
             m_add_btn = gr.Button("Add Model", variant="primary")
             m_status = gr.Textbox(label="Status", interactive=False)
@@ -273,6 +279,28 @@ def _build_app(state: AppState) -> gr.Blocks:
                 interactive=False,
                 label="Model Configurations",
             )
+
+            with gr.Accordion("Edit Model", open=False):
+                m_edit_dd = gr.Dropdown(
+                    choices=callbacks.model_choices(state.config),
+                    label="Model to Edit",
+                    interactive=True,
+                )
+                m_edit_name = gr.Textbox(label="Model Name", interactive=True)
+                with gr.Accordion("Quality Control", open=True):
+                    with gr.Row():
+                        m_edit_iter = gr.Number(label="max_iterations", value=10, precision=0)
+                        m_edit_accent = gr.Slider(
+                            label="accent_drift_threshold",
+                            minimum=0, maximum=1, step=0.01, value=0.17,
+                        )
+                        m_edit_sim = gr.Slider(
+                            label="text_similarity_threshold",
+                            minimum=0, maximum=1, step=0.01, value=0.85,
+                        )
+                m_edit_btn = gr.Button("Save Changes", variant="primary")
+                m_edit_status = gr.Textbox(label="Status", interactive=False)
+
             with gr.Row():
                 m_del_dd = gr.Dropdown(
                     choices=callbacks.model_choices(state.config),
@@ -349,40 +377,138 @@ def _build_app(state: AppState) -> gr.Blocks:
 
             # -- Model events --
 
+            def _refresh_model_dropdowns(edit_value=None):
+                """Return updated choices for delete and edit dropdowns."""
+                choices = callbacks.model_choices(state.config)
+                return (
+                    gr.Dropdown(choices=choices),
+                    gr.Dropdown(choices=choices, value=edit_value),
+                )
+
             def _add_model(mprov, mmodel, miter, macc, mtsim, mname, current_model_id):
                 table, msg = callbacks.add_model(
                     state, mprov, mmodel, miter, macc, mtsim,
                     custom_name=mname,
                 )
+                del_dd, edit_dd = _refresh_model_dropdowns()
                 return (
                     table,
                     msg,
                     _model_choices(),
                     _voice_choices(current_model_id),
-                    gr.Dropdown(choices=callbacks.model_choices(state.config)),
+                    del_dd,
+                    edit_dd,
                 )
 
             m_add_btn.click(
                 fn=_add_model,
                 inputs=[m_provider, m_model_select, m_max_iter, m_accent, m_text_sim, m_name, model_dd],
-                outputs=[m_table, m_status, model_dd, voice_dd, m_del_dd],
+                outputs=[m_table, m_status, model_dd, voice_dd, m_del_dd, m_edit_dd],
             )
+
+            # -- Edit model events --
+
+            def _on_edit_model_select(model_id):
+                name, iters, accent, sim = callbacks.load_model_for_edit(state, model_id)
+                return name, iters, accent, sim
+
+            m_edit_dd.change(
+                fn=_on_edit_model_select,
+                inputs=[m_edit_dd],
+                outputs=[m_edit_name, m_edit_iter, m_edit_accent, m_edit_sim],
+            )
+
+            def _edit_model(model_id, name, iters, accent, sim, current_model_id):
+                table_data, msg = callbacks.edit_model(
+                    state, model_id, name, iters, accent, sim,
+                )
+                updated_name, updated_iters, updated_accent, updated_sim = (
+                    callbacks.load_model_for_edit(state, model_id)
+                )
+                choices = callbacks.model_choices(state.config)
+                return (
+                    gr.Dataframe(value=table_data),
+                    msg,
+                    _model_choices(),
+                    _voice_choices(current_model_id),
+                    gr.Dropdown(choices=choices),
+                    gr.Dropdown(choices=choices, value=model_id),
+                    updated_name,
+                    updated_iters,
+                    updated_accent,
+                    updated_sim,
+                )
+
+            m_edit_btn.click(
+                fn=_edit_model,
+                inputs=[m_edit_dd, m_edit_name, m_edit_iter, m_edit_accent, m_edit_sim, model_dd],
+                outputs=[
+                    m_table, m_edit_status, model_dd, voice_dd,
+                    m_del_dd, m_edit_dd,
+                    m_edit_name, m_edit_iter, m_edit_accent, m_edit_sim,
+                ],
+            )
+
+            # -- Delete model events --
 
             def _del_model(model_id, current_model_id):
                 table, msg = callbacks.delete_model(state, model_id)
+                del_dd, edit_dd = _refresh_model_dropdowns()
                 return (
                     table,
                     msg,
                     _model_choices(),
                     _voice_choices(current_model_id),
-                    gr.Dropdown(choices=callbacks.model_choices(state.config)),
+                    del_dd,
+                    edit_dd,
                 )
 
             m_del_btn.click(
                 fn=_del_model,
                 inputs=[m_del_dd, model_dd],
-                outputs=[m_table, m_status, model_dd, voice_dd, m_del_dd],
+                outputs=[m_table, m_status, model_dd, voice_dd, m_del_dd, m_edit_dd],
             )
+
+        # ── Tab select: hydrate components from current config ────
+
+        def _on_generate_tab():
+            models = callbacks.model_choices(state.config)
+            initial_model_id = models[0][1] if models else None
+            voices = callbacks.voice_choices_for_model(state.config, initial_model_id)
+            status = callbacks.status_for_model_voice(
+                state.config, initial_model_id, voices,
+            )
+            return (
+                gr.Dropdown(choices=models, value=initial_model_id),
+                gr.Dropdown(choices=voices),
+                status,
+            )
+
+        generate_tab.select(
+            fn=_on_generate_tab,
+            outputs=[model_dd, voice_dd, status_box],
+        )
+
+        def _on_voices_tab():
+            return (
+                callbacks._voices_table(state.config),
+                gr.Dropdown(choices=callbacks.user_voice_choices(state.config)),
+            )
+
+        voices_tab.select(fn=_on_voices_tab, outputs=[v_table, v_del_dd])
+
+        def _on_models_tab():
+            choices = callbacks.model_choices(state.config)
+            return (
+                callbacks._models_table(state.config),
+                gr.Dropdown(choices=choices),
+                gr.Dropdown(choices=choices),
+            )
+
+        models_tab.select(
+            fn=_on_models_tab,
+            outputs=[m_table, m_del_dd, m_edit_dd],
+        )
 
     return app
 
