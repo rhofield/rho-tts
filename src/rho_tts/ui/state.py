@@ -92,8 +92,9 @@ class AppState:
                 if voice_profile.speaker:
                     kwargs["speaker"] = voice_profile.speaker
 
-                # Pass language (defaults to English for user-created voices)
-                kwargs["language"] = voice_profile.language
+                # Pass language only for providers that support it
+                if model_config.provider == "qwen":
+                    kwargs["language"] = voice_profile.language
 
                 # Qwen needs reference_text when doing voice cloning
                 if model_config.provider == "qwen" and voice_profile.reference_text:

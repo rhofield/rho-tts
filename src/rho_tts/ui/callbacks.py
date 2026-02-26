@@ -446,6 +446,11 @@ def status_for_model_voice(
             "This Qwen Base model requires voice cloning — add a custom voice "
             "with reference audio in the Voices tab, or switch to a CustomVoice model."
         )
+    if model_cfg.provider == "qwen" and _is_custom_voice_model(model_cfg):
+        return (
+            "This CustomVoice model requires a built-in speaker voice (e.g. Vivian, Ryan). "
+            "Voice cloning with reference audio is only supported on Base models."
+        )
     return ""
 
 
@@ -455,10 +460,10 @@ def voice_choices_for_model(
     """Return voice choices filtered by the selected model's provider.
 
     Built-in voices are filtered to only those matching the model's
-    provider. For Qwen Base models, built-in speaker voices are excluded
-    because they require a CustomVoice model. User-created voices
-    (provider=None) are always included since they carry reference audio
-    usable by any provider.
+    provider.  For Qwen Base models, built-in speaker voices are hidden
+    (they require a CustomVoice model).  For Qwen CustomVoice models,
+    user-created voice-cloning voices are hidden (they require a Base
+    model).
     """
     if not model_id:
         return voice_choices(config)
@@ -468,15 +473,23 @@ def voice_choices_for_model(
         return voice_choices(config)
 
     provider = model_cfg.provider
+    is_custom = provider == "qwen" and _is_custom_voice_model(model_cfg)
+    is_qwen_base = provider == "qwen" and not is_custom
 
     # Qwen Base models only support voice cloning via reference audio,
     # so hide built-in named-speaker voices (they have no reference audio).
-    if provider == "qwen" and not _is_custom_voice_model(model_cfg):
+    if is_qwen_base:
         builtin = []
     else:
         builtin = [(_voice_display_label(v), v.id) for v in BUILTIN_VOICES if v.provider == provider]
 
-    user = [(_voice_display_label(v), v.id) for v in config.voices.values()]
+    # Qwen CustomVoice models only support named speakers, so hide
+    # user-created voices that rely on reference audio (voice cloning).
+    if is_custom:
+        user = [(_voice_display_label(v), v.id) for v in config.voices.values() if v.speaker]
+    else:
+        user = [(_voice_display_label(v), v.id) for v in config.voices.values()]
+
     return builtin + user
 
 
