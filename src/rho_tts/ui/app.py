@@ -1,10 +1,11 @@
 """
 Gradio Blocks application for the rho-tts web UI.
 
-Three-tab layout:
+Four-tab layout:
   1. Generate — model/voice selection, text input, audio playback, phonetic mappings
   2. Voices  — manage voice profiles (upload reference audio, set transcript)
   3. Models  — manage model configurations (provider params, thresholds)
+  4. Library — browse, filter, and replay past generations
 """
 
 import argparse
@@ -469,6 +470,124 @@ def _build_app(state: AppState) -> gr.Blocks:
                 outputs=[m_table, m_status, model_dd, voice_dd, m_del_dd, m_edit_dd],
             )
 
+        # ── Tab 4: Library ──────────────────────────────────────────
+
+        with gr.Tab("Library") as library_tab:
+            gr.Markdown("### Audio Library")
+            with gr.Row():
+                lib_model_dd = gr.Dropdown(
+                    choices=callbacks.library_model_choices(state),
+                    label="Filter by Model",
+                    interactive=True,
+                    scale=1,
+                )
+                lib_voice_dd = gr.Dropdown(
+                    choices=callbacks.library_voice_choices(state),
+                    label="Filter by Voice",
+                    interactive=True,
+                    scale=1,
+                )
+                lib_text_search = gr.Textbox(
+                    label="Search Text",
+                    placeholder="Substring search...",
+                    scale=1,
+                )
+                lib_filter_btn = gr.Button("Apply Filters", scale=0, min_width=130)
+
+            lib_table = gr.Dataframe(
+                value=callbacks.library_table(state),
+                headers=["Timestamp", "Model", "Voice", "Text", "Duration", "Status", "ID"],
+                interactive=False,
+                label="Generation History",
+                column_widths=["150px", "120px", "120px", "1fr", "70px", "90px", "0px"],
+            )
+
+            with gr.Row():
+                lib_audio = gr.Audio(label="Playback", type="filepath", interactive=False)
+                lib_transcript = gr.Textbox(
+                    label="Full Transcript",
+                    interactive=False,
+                    lines=4,
+                )
+
+            with gr.Row():
+                lib_del_btn = gr.Button("Delete Selected", variant="stop", scale=0, min_width=150)
+                lib_clear_btn = gr.Button("Clear All History", variant="stop", scale=0, min_width=160)
+                lib_status = gr.Textbox(label="Status", interactive=False, scale=2)
+
+            # Hidden state to track the currently selected record ID
+            lib_selected_id = gr.State(value=None)
+
+            # -- Library events --
+
+            def _lib_apply_filters(model_f, voice_f, text_s):
+                return callbacks.library_table(state, model_f, voice_f, text_s)
+
+            lib_filter_btn.click(
+                fn=_lib_apply_filters,
+                inputs=[lib_model_dd, lib_voice_dd, lib_text_search],
+                outputs=[lib_table],
+            )
+
+            def _lib_on_select(table_data, evt: gr.SelectData):
+                """When a row is clicked, load its audio and transcript."""
+                row_idx = evt.index[0]
+                if hasattr(table_data, "values"):
+                    rows = table_data.values.tolist()
+                else:
+                    rows = table_data
+                if row_idx < 0 or row_idx >= len(rows):
+                    return None, "", None
+                record_id = rows[row_idx][-1]  # ID is last column
+                audio_path, full_text = callbacks.library_get_audio(state, record_id)
+                return audio_path, full_text, record_id
+
+            lib_table.select(
+                fn=_lib_on_select,
+                inputs=[lib_table],
+                outputs=[lib_audio, lib_transcript, lib_selected_id],
+            )
+
+            def _lib_delete(selected_id, model_f, voice_f, text_s):
+                if not selected_id:
+                    return (
+                        callbacks.library_table(state, model_f, voice_f, text_s),
+                        "No record selected.",
+                        None, None, "",
+                        gr.Dropdown(choices=callbacks.library_model_choices(state)),
+                        gr.Dropdown(choices=callbacks.library_voice_choices(state)),
+                    )
+                msg = callbacks.library_delete_record(state, selected_id)
+                return (
+                    callbacks.library_table(state, model_f, voice_f, text_s),
+                    msg,
+                    None, None, "",
+                    gr.Dropdown(choices=callbacks.library_model_choices(state)),
+                    gr.Dropdown(choices=callbacks.library_voice_choices(state)),
+                )
+
+            lib_del_btn.click(
+                fn=_lib_delete,
+                inputs=[lib_selected_id, lib_model_dd, lib_voice_dd, lib_text_search],
+                outputs=[lib_table, lib_status, lib_selected_id, lib_audio, lib_transcript, lib_model_dd, lib_voice_dd],
+            )
+
+            def _lib_clear(model_f, voice_f, text_s):
+                msg = callbacks.library_clear_history(state)
+                return (
+                    callbacks.library_table(state, model_f, voice_f, text_s),
+                    msg,
+                    None, None, "",
+                    gr.Dropdown(choices=[]),
+                    gr.Dropdown(choices=[]),
+                )
+
+            lib_clear_btn.click(
+                fn=_lib_clear,
+                inputs=[lib_model_dd, lib_voice_dd, lib_text_search],
+                outputs=[lib_table, lib_status, lib_selected_id, lib_audio, lib_transcript, lib_model_dd, lib_voice_dd],
+            )
+
         # ── Tab select: hydrate components from current config ────
 
         def _on_generate_tab():
@@ -508,6 +627,18 @@ def _build_app(state: AppState) -> gr.Blocks:
         models_tab.select(
             fn=_on_models_tab,
             outputs=[m_table, m_del_dd, m_edit_dd],
+        )
+
+        def _on_library_tab():
+            return (
+                callbacks.library_table(state),
+                gr.Dropdown(choices=callbacks.library_model_choices(state)),
+                gr.Dropdown(choices=callbacks.library_voice_choices(state)),
+            )
+
+        library_tab.select(
+            fn=_on_library_tab,
+            outputs=[lib_table, lib_model_dd, lib_voice_dd],
         )
 
     return app

@@ -72,13 +72,13 @@ class QwenTTS(BaseTTS):
         self.model_path = model_path
 
         # Configurable thresholds
-        self.MAX_CHARS_PER_TEXT = max_chars_per_text
-        self.BATCH_SIZE = batch_size
+        self.max_chars_per_text = max_chars_per_text
+        self.batch_size = batch_size
         self.force_sentence_split = False
-        self.MAX_ITERATIONS = max_iterations
-        self.ACCENT_DRIFT_THRESHOLD = accent_drift_threshold
-        self.TEXT_SIMILARITY_THRESHOLD = text_similarity_threshold
-        self.SOUND_DECAY_THRESHOLD = sound_decay_threshold
+        self.max_iterations = max_iterations
+        self.accent_drift_threshold = accent_drift_threshold
+        self.text_similarity_threshold = text_similarity_threshold
+        self.sound_decay_threshold = sound_decay_threshold
 
         # Qwen3-TTS model (lazy loaded)
         self.qwen3_model = None
@@ -269,13 +269,13 @@ class QwenTTS(BaseTTS):
     ) -> Optional[torch.Tensor]:
         """Generate and validate audio for a single text segment.
 
-        Runs the validation-retry loop up to MAX_ITERATIONS times,
+        Runs the validation-retry loop up to max_iterations times,
         returning the best audio tensor or None if generation fails entirely.
         """
         best_audio = None
         best_drift = float('inf')
 
-        for iteration in range(self.MAX_ITERATIONS):
+        for iteration in range(self.max_iterations):
             if token.is_cancelled():
                 raise CancelledException(f"Cancelled during iteration {iteration}")
 
@@ -387,7 +387,7 @@ class QwenTTS(BaseTTS):
                     raise CancelledException(f"Cancelled during text item {idx}")
 
                 # Split long text into segments
-                segments = self._split_text_into_segments(text, self.MAX_CHARS_PER_TEXT)
+                segments = self._split_text_into_segments(text, self.max_chars_per_text)
                 logger.info(f"Text item {idx + 1}: {len(text)} chars -> {len(segments)} segment(s)")
 
                 audio_segments = []

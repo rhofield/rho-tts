@@ -16,11 +16,14 @@ from ..factory import TTSFactory
 from ..base_tts import BaseTTS
 from .config import (
     AppConfig,
+    GenerationRecord,
     ModelConfig,
     VoiceProfile,
     get_phonetic_key,
     load_config,
+    load_history,
     save_config,
+    save_history,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,6 +44,7 @@ class AppState:
         self._cache_key: Optional[tuple] = None  # (voice_id, model_id)
         self._lock = threading.Lock()
         self.cancellation_token: Optional[CancellationToken] = None
+        self._history: Optional[list] = None  # lazy-loaded
 
     def save(self) -> None:
         save_config(self.config, self._config_path)
@@ -119,6 +123,34 @@ class AppState:
                 self._cache_key = None
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
+
+    @property
+    def history(self) -> list[GenerationRecord]:
+        """Lazy-load generation history from disk on first access."""
+        if self._history is None:
+            self._history = load_history()
+        return self._history
+
+    def add_generation_record(self, record: GenerationRecord) -> None:
+        """Append a generation record and persist to disk."""
+        self.history.append(record)
+        save_history(self._history)
+
+    def delete_generation_record(self, record_id: str) -> bool:
+        """Remove a generation record by ID. Returns True if found."""
+        before = len(self.history)
+        self._history = [r for r in self._history if r.id != record_id]
+        if len(self._history) < before:
+            save_history(self._history)
+            return True
+        return False
+
+    def clear_history(self) -> int:
+        """Remove all generation records. Returns count removed."""
+        count = len(self.history)
+        self._history = []
+        save_history(self._history)
+        return count
 
     def new_cancellation_token(self) -> CancellationToken:
         """Create and store a fresh cancellation token for a new generation run."""

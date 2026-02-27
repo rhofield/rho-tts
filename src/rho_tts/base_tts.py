@@ -47,8 +47,8 @@ class BaseTTS(ABC):
         self._set_seeds()
 
         # Validation thresholds (subclasses override as needed)
-        self.ACCENT_DRIFT_THRESHOLD = 0.17
-        self.TEXT_SIMILARITY_THRESHOLD = 0.85
+        self.accent_drift_threshold = 0.17
+        self.text_similarity_threshold = 0.85
 
         # Audio segment smoothing parameters
         self.silence_threshold_db = -50.0
@@ -116,7 +116,7 @@ class BaseTTS(ABC):
             drift_prob = predict_accent_drift_probability(audio_path)
             if drift_prob is None:
                 return 0.0, True
-            return drift_prob, drift_prob < self.ACCENT_DRIFT_THRESHOLD
+            return drift_prob, drift_prob < self.accent_drift_threshold
         except ImportError:
             logger.debug("Accent drift classifier not available, skipping validation")
             return 0.0, True
@@ -126,7 +126,7 @@ class BaseTTS(ABC):
         try:
             from .validation.stt.stt_validator import validate_audio_text_match
             is_accurate, similarity, transcribed = validate_audio_text_match(
-                audio_path, expected_text, self.TEXT_SIMILARITY_THRESHOLD
+                audio_path, expected_text, self.text_similarity_threshold
             )
             return is_accurate, similarity, transcribed
         except ImportError:

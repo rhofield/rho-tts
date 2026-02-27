@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_DIR = os.path.expanduser("~/.rho_tts")
 DEFAULT_CONFIG_PATH = os.path.join(DEFAULT_CONFIG_DIR, "config.json")
+DEFAULT_HISTORY_PATH = os.path.join(DEFAULT_CONFIG_DIR, "history.json")
 DEFAULT_VOICES_DIR = os.path.join(DEFAULT_CONFIG_DIR, "voices")
 
 
@@ -214,6 +215,51 @@ class ModelConfig:
 
 
 @dataclass
+class GenerationRecord:
+    """A single TTS generation event for the audio library."""
+
+    id: str
+    timestamp: float
+    audio_path: str
+    text: str
+    model_id: str
+    model_name: str
+    voice_id: Optional[str]
+    voice_name: str
+    provider: str
+    duration_sec: Optional[float] = None
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "timestamp": self.timestamp,
+            "audio_path": self.audio_path,
+            "text": self.text,
+            "model_id": self.model_id,
+            "model_name": self.model_name,
+            "voice_id": self.voice_id,
+            "voice_name": self.voice_name,
+            "provider": self.provider,
+            "duration_sec": self.duration_sec,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "GenerationRecord":
+        return cls(
+            id=data["id"],
+            timestamp=data["timestamp"],
+            audio_path=data["audio_path"],
+            text=data["text"],
+            model_id=data["model_id"],
+            model_name=data["model_name"],
+            voice_id=data.get("voice_id"),
+            voice_name=data.get("voice_name", ""),
+            provider=data["provider"],
+            duration_sec=data.get("duration_sec"),
+        )
+
+
+@dataclass
 class AppConfig:
     voices: Dict[str, VoiceProfile] = field(default_factory=dict)
     models: Dict[str, ModelConfig] = field(default_factory=dict)
@@ -280,6 +326,36 @@ def save_config(config: AppConfig, path: Optional[str] = None) -> None:
     with open(path, "w") as f:
         json.dump(config.to_dict(), f, indent=2)
     logger.info(f"Config saved to {path}")
+
+
+def get_history_path() -> str:
+    """Resolve history file path from env var or default."""
+    return os.environ.get("RHO_TTS_HISTORY", DEFAULT_HISTORY_PATH)
+
+
+def load_history(path: Optional[str] = None) -> List[GenerationRecord]:
+    """Load generation history from JSON file.
+
+    Returns an empty list if the file doesn't exist or is invalid.
+    """
+    path = path or get_history_path()
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+        return [GenerationRecord.from_dict(r) for r in data]
+    except Exception as e:
+        logger.warning(f"Failed to load history from {path}: {e}")
+        return []
+
+
+def save_history(records: List[GenerationRecord], path: Optional[str] = None) -> None:
+    """Persist generation history to JSON file."""
+    path = path or get_history_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump([r.to_dict() for r in records], f, indent=2)
 
 
 def copy_voice_audio(source_path: str, voice_id: str) -> str:

@@ -10,12 +10,15 @@ import logging
 import os
 import time
 import uuid
+import wave
+from datetime import datetime
 from typing import Optional
 
 from ..cancellation import CancelledException
 from .config import (
     BUILTIN_VOICES,
     AppConfig,
+    GenerationRecord,
     ModelConfig,
     VoiceProfile,
     copy_voice_audio,
@@ -32,6 +35,16 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Generate tab
 # ---------------------------------------------------------------------------
+
+
+def _get_wav_duration(path: str) -> Optional[float]:
+    """Return duration in seconds from a WAV file header, or None on error."""
+    try:
+        with wave.open(path, "rb") as wf:
+            return wf.getnframes() / wf.getframerate()
+    except Exception:
+        return None
+
 
 def generate_audio(
     state: AppState,
@@ -97,6 +110,25 @@ def generate_audio(
         result = tts.generate_single(text, output_path, cancellation_token=token)
         if result is None:
             return None, "Generation failed — no audio produced. Check logs for details."
+
+        # Record in library history
+        voice_name = ""
+        if voice_cfg:
+            voice_name = voice_cfg.name
+        record = GenerationRecord(
+            id=uuid.uuid4().hex[:12],
+            timestamp=time.time(),
+            audio_path=output_path,
+            text=text,
+            model_id=model_id,
+            model_name=model_cfg.name,
+            voice_id=voice_id or None,
+            voice_name=voice_name,
+            provider=model_cfg.provider,
+            duration_sec=_get_wav_duration(output_path),
+        )
+        state.add_generation_record(record)
+
         return output_path, f"Generated: {os.path.basename(output_path)}"
     except CancelledException:
         return None, "Generation cancelled."
@@ -496,3 +528,77 @@ def voice_choices_for_model(
 def model_choices(config: AppConfig) -> list[tuple[str, str]]:
     """Return (display_label, value) pairs for model dropdown."""
     return [(m.name, m.id) for m in config.models.values()]
+
+
+# ---------------------------------------------------------------------------
+# Library tab
+# ---------------------------------------------------------------------------
+
+
+def library_table(
+    state: AppState,
+    model_filter: Optional[str] = None,
+    voice_filter: Optional[str] = None,
+    text_search: Optional[str] = None,
+) -> list[list]:
+    """Build filtered library table rows, sorted newest-first.
+
+    Each row: [Timestamp, Model, Voice, Text (truncated), Duration, Status, ID (hidden)]
+    """
+    records = state.history
+    if model_filter:
+        records = [r for r in records if r.model_name == model_filter]
+    if voice_filter:
+        records = [r for r in records if r.voice_name == voice_filter]
+    if text_search and text_search.strip():
+        query = text_search.strip().lower()
+        records = [r for r in records if query in r.text.lower()]
+
+    records = sorted(records, key=lambda r: r.timestamp, reverse=True)
+
+    rows = []
+    for r in records:
+        ts = datetime.fromtimestamp(r.timestamp).strftime("%Y-%m-%d %H:%M:%S")
+        text_preview = r.text[:80] + "..." if len(r.text) > 80 else r.text
+        dur = f"{r.duration_sec:.1f}s" if r.duration_sec else ""
+        status = "OK" if os.path.exists(r.audio_path) else "File missing"
+        rows.append([ts, r.model_name, r.voice_name, text_preview, dur, status, r.id])
+    return rows
+
+
+def library_model_choices(state: AppState) -> list[str]:
+    """Return distinct model names from history for the filter dropdown."""
+    names = sorted({r.model_name for r in state.history})
+    return names
+
+
+def library_voice_choices(state: AppState) -> list[str]:
+    """Return distinct voice names from history for the filter dropdown."""
+    names = sorted({r.voice_name for r in state.history if r.voice_name})
+    return names
+
+
+def library_get_audio(
+    state: AppState, record_id: str,
+) -> tuple[Optional[str], str]:
+    """Look up a record by ID and return (audio_path_or_None, full_text)."""
+    for r in state.history:
+        if r.id == record_id:
+            path = r.audio_path if os.path.exists(r.audio_path) else None
+            return path, r.text
+    return None, ""
+
+
+def library_delete_record(
+    state: AppState, record_id: str,
+) -> str:
+    """Delete a single library record (audio file is left untouched)."""
+    if state.delete_generation_record(record_id):
+        return "Record deleted."
+    return "Record not found."
+
+
+def library_clear_history(state: AppState) -> str:
+    """Clear all library history."""
+    count = state.clear_history()
+    return f"Cleared {count} record(s)."

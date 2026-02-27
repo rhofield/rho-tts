@@ -61,10 +61,10 @@ class ChatterboxTTS(BaseTTS):
         self.implementation = implementation
 
         # Configurable thresholds
-        self.MAX_CHARS_PER_SEGMENT = max_chars_per_segment
-        self.MAX_ITERATIONS = max_iterations
-        self.ACCENT_DRIFT_THRESHOLD = accent_drift_threshold
-        self.TEXT_SIMILARITY_THRESHOLD = text_similarity_threshold
+        self.max_chars_per_segment = max_chars_per_segment
+        self.max_iterations = max_iterations
+        self.accent_drift_threshold = accent_drift_threshold
+        self.text_similarity_threshold = text_similarity_threshold
 
         # Initialize the base ChatterboxTTS model
         try:
@@ -136,7 +136,7 @@ class ChatterboxTTS(BaseTTS):
                 best_wav = None
                 best_accent_drift = float('inf')
 
-                for n_iterations in range(self.MAX_ITERATIONS):
+                for n_iterations in range(self.max_iterations):
                     if token.is_cancelled():
                         raise CancelledException("Audio generation was cancelled during retry loop")
 
@@ -176,7 +176,7 @@ class ChatterboxTTS(BaseTTS):
                             is_text_accurate, text_similarity, transcribed_text = self._validate_text_match(
                                 temp_output_path, text
                             )
-                            thresh = self.TEXT_SIMILARITY_THRESHOLD
+                            thresh = self.text_similarity_threshold
                             logger.info(f"Text similarity: {text_similarity:.3f} (threshold: {thresh})")
                             if transcribed_text:
                                 logger.debug(f"   Original: {text}")
@@ -196,7 +196,7 @@ class ChatterboxTTS(BaseTTS):
 
                         logger.warning(
                             f"Audio invalid: {', '.join(failure_reasons)}, "
-                            f"retrying... (iteration {n_iterations + 1}/{self.MAX_ITERATIONS})"
+                            f"retrying... (iteration {n_iterations + 1}/{self.max_iterations})"
                         )
                     else:
                         return wav
@@ -210,7 +210,7 @@ class ChatterboxTTS(BaseTTS):
                     logger.warning("Max iterations reached, returning last generated audio")
                     return wav
 
-            segments = self._split_text_into_segments(text, self.MAX_CHARS_PER_SEGMENT)
+            segments = self._split_text_into_segments(text, self.max_chars_per_segment)
             audio_segments = []
 
             for i, segment in enumerate(segments):
