@@ -20,12 +20,12 @@ tts = TTSFactory.get_tts_instance(
 )
 
 result = tts.generate(
-    texts=["Hello! This is a test of the text to speech system."],
-    output_base_path="output_default_voice",
+    "Hello! This is a test of the text to speech system.",
+    "output_default_voice.wav",
 )
 
-if result and result[0]:
-    print(f"Generated audio with default voice: {result[0]}")
+if result:
+    print(f"Generated audio with default voice: {result}")
 else:
     print("Audio generation failed")
 
@@ -38,12 +38,12 @@ tts_cloned = TTSFactory.get_tts_instance(
 )
 
 result = tts_cloned.generate(
-    texts=["Hello! This is a test of the text to speech system."],
-    output_base_path="output_cloned_voice",
+    "Hello! This is a test of the text to speech system.",
+    "output_cloned_voice.wav",
 )
 
-if result and result[0]:
-    print(f"Generated audio with cloned voice: {result[0]}")
+if result:
+    print(f"Generated audio with cloned voice: {result}")
 else:
     print("Audio generation failed")
 
@@ -55,10 +55,7 @@ texts = [
     "And finally, a third sentence to complete the set.",
 ]
 
-output_files = tts.generate(
-    texts=texts,
-    output_base_path="output_batch",
-)
+output_files = tts.generate(texts, "output_batch")
 
 if output_files:
     for path in output_files:

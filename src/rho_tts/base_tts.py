@@ -7,6 +7,7 @@ that can be reused across different TTS providers.
 import logging
 import os
 import random
+import tempfile
 import time
 import traceback
 from abc import ABC, abstractmethod
@@ -529,7 +530,8 @@ class BaseTTS(ABC):
                             best_audio = audio
                             break
 
-                        temp_path = f"/tmp/rho_tts_validate_{idx}_{seg_idx}_{iteration}.wav"
+                        fd, temp_path = tempfile.mkstemp(suffix=".wav", prefix="rho_tts_validate_")
+                        os.close(fd)
                         try:
                             save_wav = audio.cpu() if audio.device.type != 'cpu' else audio
                             if save_wav.dim() == 1:
@@ -587,8 +589,7 @@ class BaseTTS(ABC):
                         del audio
                         if torch.cuda.is_available():
                             torch.cuda.empty_cache()
-                    else:
-                        # Loop exhausted without break
+                    else:  # noqa: E225 — for/else: runs when loop exhausts without break
                         if best_audio is not None:
                             logger.warning(
                                 f"    Segment {seg_idx + 1}: max iterations reached, "

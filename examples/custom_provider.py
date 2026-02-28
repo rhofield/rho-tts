@@ -69,6 +69,6 @@ tts = TTSFactory.get_tts_instance(
 print(f"Available providers: {TTSFactory.list_providers()}")
 
 # Generate audio — generate() is the primary API
-result = tts.generate(["Hello from my custom TTS provider!"], "custom_output")
-if result and result[0]:
-    print(f"Custom provider audio generated: {result[0]}")
+result = tts.generate("Hello from my custom TTS provider!", "custom_output.wav")
+if result:
+    print(f"Custom provider audio generated: {result}")

@@ -4,6 +4,8 @@ Validates the public API surface, exports, entry points, optional dependency
 error messages, and that core functionality is usable without provider extras.
 """
 
+import os
+
 import torch
 import pytest
 
@@ -151,6 +153,69 @@ class TestBaseTTSUtilities:
 # ---------------------------------------------------------------------------
 # Optional dependency error messages
 # ---------------------------------------------------------------------------
+
+class GeneratingTTS(BaseTTS):
+    """Stub that does NOT override generate(), exercising the base class logic."""
+
+    def __init__(self, **kwargs):
+        super().__init__(device="cpu", **kwargs)
+        self._sample_rate = 16000
+
+    @property
+    def sample_rate(self) -> int:
+        return self._sample_rate
+
+    def _generate_audio(self, text, **kwargs):
+        # Return 0.5 seconds of deterministic audio
+        return torch.randn(self._sample_rate // 2)
+
+
+class TestBaseTTSGenerate:
+    """Test BaseTTS.generate() without provider override."""
+
+    @pytest.fixture()
+    def tts(self):
+        return GeneratingTTS()
+
+    def test_single_string_returns_path(self, tts, tmp_path):
+        out = str(tmp_path / "out.wav")
+        result = tts.generate("Hello world", out)
+        assert result == out
+        assert os.path.exists(out)
+
+    def test_single_string_none_on_failure(self, tts, tmp_path):
+        tts._generate_audio = lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom"))
+        result = tts.generate("Hello", str(tmp_path / "out.wav"))
+        assert result is None
+
+    def test_list_returns_list_of_paths(self, tts, tmp_path):
+        out = str(tmp_path / "batch")
+        result = tts.generate(["First text", "Second text"], out)
+        assert isinstance(result, list)
+        assert len(result) == 2
+        for path in result:
+            assert path is not None
+            assert os.path.exists(path)
+
+    def test_phonetic_mapping_applied(self, tts, tmp_path):
+        tts.phonetic_mapping = {"AI": "A.I."}
+        calls = []
+        original = tts._generate_audio
+
+        def tracking_generate(text, **kwargs):
+            calls.append(text)
+            return original(text, **kwargs)
+
+        tts._generate_audio = tracking_generate
+        tts.generate("AI is great", str(tmp_path / "out.wav"))
+        assert any("A.I." in c for c in calls)
+
+    def test_cancellation_returns_none(self, tts, tmp_path):
+        token = CancellationToken()
+        token.cancel()
+        result = tts.generate("Hello", str(tmp_path / "out.wav"), cancellation_token=token)
+        assert result is None
+
 
 class TestOptionalDependencyErrors:
     def test_voice_encoder_missing_gives_install_hint(self):

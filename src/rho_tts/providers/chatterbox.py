@@ -32,6 +32,8 @@ class ChatterboxTTS(BaseTTS):
         accent_drift_threshold: Threshold for accent drift (default: 0.17)
         text_similarity_threshold: Min similarity for STT validation (default: 0.75)
         phonetic_mapping: Custom word-to-pronunciation mapping
+        temperature: Sampling temperature for generation (default: 1.0)
+        cfg_weight: Classifier-free guidance weight (default: 0.6)
     """
 
     def __init__(
@@ -46,6 +48,8 @@ class ChatterboxTTS(BaseTTS):
         accent_drift_threshold: float = 0.17,
         text_similarity_threshold: float = 0.75,
         phonetic_mapping: Optional[Dict[str, str]] = None,
+        temperature: float = 1.0,
+        cfg_weight: float = 0.6,
     ):
         super().__init__(device, seed, deterministic, phonetic_mapping=phonetic_mapping)
 
@@ -82,8 +86,8 @@ class ChatterboxTTS(BaseTTS):
 
         self.model = ChatterboxModel.from_pretrained(device=device)
         self._prompt_cache: Dict = {}
-        self.temperature = 1.0
-        self.cfg_weight = 0.6
+        self.temperature = temperature
+        self.cfg_weight = cfg_weight
 
         if implementation == "faster":
             logger.info("Using 'faster' implementation with rsxdalv optimizations")

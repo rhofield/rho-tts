@@ -26,9 +26,9 @@ tts = TTSFactory.get_tts_instance(
 
 # Generate with full validation loop
 result = tts.generate(
-    texts=["The quick brown fox jumps over the lazy dog."],
-    output_base_path="cloned_voice_output",
+    "The quick brown fox jumps over the lazy dog.",
+    "cloned_voice_output.wav",
 )
 
-if result and result[0]:
-    print(f"Voice cloned audio saved: {result[0]}")
+if result:
+    print(f"Voice cloned audio saved: {result}")
