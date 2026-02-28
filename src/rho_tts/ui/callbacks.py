@@ -107,7 +107,7 @@ def generate_audio(
     output_path = os.path.join(state.config.output_dir, f"gen_{voice_label}_{timestamp}.wav")
 
     try:
-        result = tts.generate_single(text, output_path, cancellation_token=token)
+        result = tts.generate(text, output_path, cancellation_token=token)
         if result is None:
             return None, "Generation failed — no audio produced. Check logs for details."
 

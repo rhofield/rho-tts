@@ -7,14 +7,11 @@ default voice and voice cloning via reference audio.
 """
 import logging
 import os
-import traceback
 from typing import Dict, List, Optional, Union
 
 import torch
-import torchaudio as ta
 
 from ..base_tts import BaseTTS
-from ..cancellation import CancellationToken, CancelledException
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +69,7 @@ class QwenTTS(BaseTTS):
         self.model_path = model_path
 
         # Configurable thresholds
-        self.max_chars_per_text = max_chars_per_text
+        self.max_chars_per_segment = max_chars_per_text
         self.batch_size = batch_size
         self.force_sentence_split = False
         self.max_iterations = max_iterations
@@ -195,293 +192,33 @@ class QwenTTS(BaseTTS):
         torch_wavs = [torch.from_numpy(wav).float() for wav in wavs]
         return torch_wavs[0] if is_single else torch_wavs
 
-    @staticmethod
-    def _normalize_audio_for_voice(
-        audio_tensor: torch.Tensor,
-        target_rms_db: float = -23.0,
-        min_rms_db: float = -30.0,
-        max_rms_db: float = -10.0,
-    ) -> torch.Tensor:
-        """
-        Normalize audio to keep voice in an optimal loudness range.
+    def _post_process_audio(self, audio: torch.Tensor) -> torch.Tensor:
+        """Normalize audio loudness for consistent voice output.
 
-        Uses dynamic range compression to make quiet parts louder while
-        preventing loud parts from clipping.
+        Uses RMS-based gain normalization with soft clipping (tanh) to keep
+        voice in an optimal loudness range without harsh distortion.
         """
-        original_shape = audio_tensor.shape
-        if audio_tensor.dim() > 1:
-            audio_tensor = audio_tensor.squeeze()
+        target_rms_db = -23.0
 
-        rms = torch.sqrt(torch.mean(audio_tensor ** 2))
+        original_shape = audio.shape
+        if audio.dim() > 1:
+            audio = audio.squeeze()
+
+        rms = torch.sqrt(torch.mean(audio ** 2))
 
         if rms < 1e-8:
-            return audio_tensor.reshape(original_shape)
+            return audio.reshape(original_shape)
 
         current_rms_db = 20 * torch.log10(rms)
         gain_db = target_rms_db - current_rms_db.item()
         gain_linear = 10 ** (gain_db / 20)
 
-        normalized = audio_tensor * gain_linear
+        normalized = audio * gain_linear
 
         max_amplitude = 0.95
         normalized = torch.tanh(normalized / max_amplitude) * max_amplitude
 
         return normalized.reshape(original_shape)
-
-    @staticmethod
-    def _detect_sound_decay(
-        audio_tensor: torch.Tensor,
-        sample_rate: int,
-        window_size: float = 1,
-        decay_threshold: float = 0.3,
-    ) -> tuple[bool, float]:
-        """
-        Detect if sound level decays significantly over time.
-
-        Returns:
-            Tuple of (has_decay, energy_ratio)
-        """
-        if audio_tensor.dim() > 1:
-            audio_tensor = audio_tensor.squeeze()
-
-        min_samples = int(2 * window_size * sample_rate)
-        if len(audio_tensor) < min_samples:
-            return False, 1.0
-
-        window_samples = int(window_size * sample_rate)
-
-        initial_segment = audio_tensor[:window_samples]
-        final_segment = audio_tensor[-window_samples:]
-
-        initial_rms = torch.sqrt(torch.mean(initial_segment ** 2))
-        final_rms = torch.sqrt(torch.mean(final_segment ** 2))
-
-        if initial_rms < 1e-8:
-            return False, 1.0
-
-        energy_ratio = (final_rms / initial_rms).item()
-        has_decay = energy_ratio < decay_threshold
-
-        return has_decay, energy_ratio
-
-    def _generate_validated_segment(
-        self, text: str, item_idx: int, seg_idx: int, token: CancellationToken
-    ) -> Optional[torch.Tensor]:
-        """Generate and validate audio for a single text segment.
-
-        Runs the validation-retry loop up to max_iterations times,
-        returning the best audio tensor or None if generation fails entirely.
-        """
-        best_audio = None
-        best_drift = float('inf')
-
-        for iteration in range(self.max_iterations):
-            if token.is_cancelled():
-                raise CancelledException(f"Cancelled during iteration {iteration}")
-
-            try:
-                audio_tensor = self._generate_audio(text)
-                audio_tensor = self._normalize_audio_for_voice(audio_tensor)
-
-                temp_path = None
-                try:
-                    temp_path = f"/tmp/rho_tts_validate_{item_idx}_{seg_idx}_{iteration}.wav"
-                    segment_wav = audio_tensor.cpu() if audio_tensor.device.type != 'cpu' else audio_tensor
-                    if segment_wav.dim() == 1:
-                        segment_wav = segment_wav.unsqueeze(0)
-                    ta.save(temp_path, segment_wav, self.qwen3_sr)
-
-                    # Validation 1: Accent drift
-                    drift_prob, is_voice_accurate = self._validate_accent_drift(temp_path)
-
-                    # Validation 2: Text matching
-                    is_text_accurate = True
-                    text_similarity = 1.0
-
-                    if is_voice_accurate:
-                        is_text_accurate, text_similarity, _ = self._validate_text_match(temp_path, text)
-
-                    is_valid = is_voice_accurate and is_text_accurate
-
-                    if drift_prob is not None and drift_prob < best_drift:
-                        best_drift = drift_prob
-                        best_audio = audio_tensor.clone()
-
-                    if is_valid:
-                        logger.info(
-                            f"  Segment {seg_idx + 1} PASSED "
-                            f"(drift={drift_prob:.3f}, text={text_similarity:.3f})"
-                        )
-                        return audio_tensor
-                    else:
-                        reasons = []
-                        if not is_voice_accurate:
-                            reasons.append(f"drift={drift_prob:.3f}")
-                        if not is_text_accurate:
-                            reasons.append(f"text={text_similarity:.3f}")
-                        logger.warning(
-                            f"  Segment {seg_idx + 1} FAILED iteration {iteration + 1} "
-                            f"({', '.join(reasons)}), best_drift={best_drift:.3f}"
-                        )
-
-                except Exception as e:
-                    logger.warning(f"  Segment {seg_idx + 1}: Error during validation ({e})")
-                finally:
-                    if temp_path and os.path.exists(temp_path):
-                        try:
-                            os.remove(temp_path)
-                        except OSError:
-                            pass
-
-                del audio_tensor
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-
-            except ValueError:
-                raise  # Config error — don't retry
-            except RuntimeError as e:
-                if "out of memory" in str(e).lower() or "length" in str(e).lower():
-                    logger.error(f"Segment {seg_idx + 1} OOM: {e}")
-                else:
-                    raise
-            except Exception as e:
-                logger.warning(f"Segment {seg_idx + 1}: Error ({e})")
-
-        if best_audio is not None:
-            logger.warning(
-                f"Segment {seg_idx + 1}: Max iterations reached, "
-                f"returning best audio (drift={best_drift:.3f})"
-            )
-        return best_audio
-
-    def generate(
-        self,
-        texts: List[str],
-        output_base_path: str,
-        cancellation_token: Optional[CancellationToken] = None,
-    ) -> Optional[List[str]]:
-        """
-        Generate TTS audio with text splitting, validation, and segment joining.
-
-        Long texts are split into segments at natural break points, each segment
-        is generated and validated independently, then segments are joined with
-        crossfading via _smooth_segment_join().
-
-        Args:
-            texts: List of text strings to generate audio for
-            output_base_path: Base path for output files (will append _{idx}.wav)
-            cancellation_token: Optional token for cancellation
-
-        Returns:
-            List of output file paths (None for failed items), or None if completely failed
-        """
-        try:
-            token = cancellation_token or CancellationToken()
-            mapped_texts = [self._apply_phonetic_mapping(text) for text in texts]
-            output_files = []
-
-            logger.info(f"Generating audio for {len(mapped_texts)} text item(s) with Qwen3-TTS...")
-
-            for idx, text in enumerate(mapped_texts):
-                if token.is_cancelled():
-                    raise CancelledException(f"Cancelled during text item {idx}")
-
-                # Split long text into segments
-                segments = self._split_text_into_segments(text, self.max_chars_per_text)
-                logger.info(f"Text item {idx + 1}: {len(text)} chars -> {len(segments)} segment(s)")
-
-                audio_segments = []
-                for seg_idx, segment in enumerate(segments):
-                    if token.is_cancelled():
-                        raise CancelledException(f"Cancelled during segment {seg_idx + 1} of item {idx + 1}")
-
-                    logger.info(f"  Segment {seg_idx + 1}/{len(segments)} ({len(segment)} chars)")
-                    audio = self._generate_validated_segment(segment, idx, seg_idx, token)
-                    if audio is not None:
-                        audio_segments.append(audio)
-                    else:
-                        logger.error(f"  Segment {seg_idx + 1} failed to generate")
-
-                if not audio_segments:
-                    logger.error(f"Item {idx + 1} failed: no segments generated")
-                    output_files.append(None)
-                    continue
-
-                # Join segments with crossfading
-                if len(audio_segments) > 1:
-                    final_audio = self._smooth_segment_join(audio_segments)
-                else:
-                    final_audio = audio_segments[0]
-
-                if final_audio is None:
-                    logger.error(f"Item {idx + 1} failed: segment join returned None")
-                    output_files.append(None)
-                    continue
-
-                # Save
-                try:
-                    output_path = f"{output_base_path}_{idx}.wav"
-                    final_wav = final_audio.cpu() if final_audio.device.type != 'cpu' else final_audio
-                    if final_wav.dim() == 1:
-                        final_wav = final_wav.unsqueeze(0)
-                    ta.save(output_path, final_wav, self.qwen3_sr)
-                    output_files.append(output_path)
-                    logger.info(f"Item {idx + 1} saved: {output_path}")
-
-                    del final_wav, final_audio
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-
-                except Exception as e:
-                    logger.error(f"Failed to save audio for item {idx}: {e}")
-                    output_files.append(None)
-
-            successful = sum(1 for f in output_files if f is not None)
-            failed = len(output_files) - successful
-
-            if failed > 0:
-                logger.warning(f"{failed}/{len(output_files)} text item(s) failed to generate")
-
-            if successful == 0:
-                logger.error("All text items failed to generate")
-                return None
-
-            logger.info(f"Successfully generated {successful}/{len(output_files)} audio file(s)")
-            return output_files
-
-        except CancelledException as e:
-            logger.warning(f"Generation cancelled: {e}")
-            return None
-        except Exception as e:
-            logger.error(f"Error in Qwen3 TTS: {e}")
-            traceback.print_exc()
-            return None
-
-    def generate_single(
-        self,
-        text: str,
-        output_path: str,
-        cancellation_token: Optional[CancellationToken] = None,
-    ) -> Optional[torch.Tensor]:
-        """Generate audio for a single text using the batch pipeline."""
-        import shutil
-
-        temp_dir = os.path.dirname(output_path)
-        temp_base = os.path.join(temp_dir, "temp_single_gen")
-
-        result = self.generate([text], temp_base, cancellation_token)
-
-        if result is None or len(result) == 0 or result[0] is None:
-            return None
-
-        temp_file = result[0]
-        if os.path.exists(temp_file):
-            shutil.move(temp_file, output_path)
-            logger.info(f"Single audio saved: {output_path}")
-            wav, sr = ta.load(output_path)
-            return wav.squeeze(0)
-
-        return None
 
     @property
     def sample_rate(self) -> int:

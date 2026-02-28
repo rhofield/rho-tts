@@ -10,7 +10,6 @@ from typing import Any
 
 # Request types (main -> worker)
 INIT = "init"
-GENERATE_SINGLE = "generate_single"
 GENERATE = "generate"
 CANCEL = "cancel"
 SHUTDOWN = "shutdown"

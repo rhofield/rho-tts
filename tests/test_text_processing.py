@@ -26,12 +26,6 @@ class ConcreteTTS(BaseTTS):
     def _generate_audio(self, text, **kwargs):
         pass
 
-    def generate(self, texts, output_base_path, cancellation_token=None):
-        pass
-
-    def generate_single(self, text, output_path, cancellation_token=None):
-        pass
-
     @property
     def sample_rate(self):
         return self._sample_rate

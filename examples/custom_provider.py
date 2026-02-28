@@ -3,12 +3,20 @@ Custom TTS provider registration example.
 
 Shows how to create and register your own TTS provider that
 integrates with the rho-tts factory pattern.
+
+Only two abstract methods need implementing:
+  - _generate_audio(text) -> audio tensor
+  - sample_rate (property)
+
+The base class provides generate() with text splitting, segment
+joining, phonetic mapping, and validation/retry out of the box.
+Override _post_process_audio() to add custom audio post-processing.
 """
 from typing import Dict, List, Optional, Union
 
 import torch
 
-from rho_tts import BaseTTS, CancellationToken, TTSFactory
+from rho_tts import BaseTTS, TTSFactory
 
 
 class MyCustomTTS(BaseTTS):
@@ -42,51 +50,6 @@ class MyCustomTTS(BaseTTS):
 
         return results[0] if is_single else results
 
-    def generate(
-        self,
-        texts: List[str],
-        output_base_path: str,
-        cancellation_token: Optional[CancellationToken] = None,
-    ) -> Optional[List[str]]:
-        """Batch generation."""
-        import torchaudio as ta
-
-        token = cancellation_token or CancellationToken()
-        output_files = []
-
-        for idx, text in enumerate(texts):
-            token.raise_if_cancelled()
-            mapped_text = self._apply_phonetic_mapping(text)
-            audio = self._generate_audio(mapped_text)
-
-            output_path = f"{output_base_path}_{idx}.wav"
-            if audio.dim() == 1:
-                audio = audio.unsqueeze(0)
-            ta.save(output_path, audio, self._sample_rate)
-            output_files.append(output_path)
-
-        return output_files
-
-    def generate_single(
-        self,
-        text: str,
-        output_path: str,
-        cancellation_token: Optional[CancellationToken] = None,
-    ) -> Optional[torch.Tensor]:
-        """Single text generation."""
-        import torchaudio as ta
-
-        mapped_text = self._apply_phonetic_mapping(text)
-        audio = self._generate_audio(mapped_text)
-
-        if audio.dim() == 1:
-            save_audio = audio.unsqueeze(0)
-        else:
-            save_audio = audio
-
-        ta.save(output_path, save_audio, self._sample_rate)
-        return audio
-
     @property
     def sample_rate(self) -> int:
         return self._sample_rate
@@ -105,6 +68,7 @@ tts = TTSFactory.get_tts_instance(
 # List all available providers
 print(f"Available providers: {TTSFactory.list_providers()}")
 
-# Generate audio
-tts.generate_single("Hello from my custom TTS provider!", "custom_output.wav")
-print("Custom provider audio generated!")
+# Generate audio — generate() is the primary API
+result = tts.generate(["Hello from my custom TTS provider!"], "custom_output")
+if result and result[0]:
+    print(f"Custom provider audio generated: {result[0]}")

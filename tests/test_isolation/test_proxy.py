@@ -1,8 +1,6 @@
 """Tests for ProviderProxy — the duck-typed BaseTTS proxy."""
 
-import json
-import threading
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -53,15 +51,8 @@ class TestProviderProxy:
             {"type": RESULT, "output_path": output_path, "success": True},
         ])
 
-        # Mock torchaudio.load since we don't have a real WAV file
-        import torch
-        mock_ta = MagicMock()
-        mock_ta.load.return_value = (torch.zeros(1, 24000), 24000)
-        with patch.dict("sys.modules", {"torchaudio": mock_ta}):
-            result = proxy.generate_single("Hello", output_path)
-
-        assert result is not None
-        assert result.shape == (1, 24000)
+        result = proxy.generate("Hello", output_path)
+        assert result == output_path
 
     def test_generate_single_failure_returns_none(self):
         proxy, worker = self._make_proxy([
@@ -69,7 +60,7 @@ class TestProviderProxy:
             {"type": RESULT, "output_path": "/tmp/test.wav", "success": False},
         ])
 
-        result = proxy.generate_single("Hello", "/tmp/test.wav")
+        result = proxy.generate("Hello", "/tmp/test.wav")
         assert result is None
 
     def test_generate_single_cancelled(self):
@@ -78,7 +69,7 @@ class TestProviderProxy:
             {"type": CANCELLED},
         ])
 
-        result = proxy.generate_single("Hello", "/tmp/test.wav")
+        result = proxy.generate("Hello", "/tmp/test.wav")
         assert result is None
 
     def test_generate_single_error_raises(self):
@@ -88,7 +79,7 @@ class TestProviderProxy:
         ])
 
         with pytest.raises(RuntimeError, match="OOM"):
-            proxy.generate_single("Hello", "/tmp/test.wav")
+            proxy.generate("Hello", "/tmp/test.wav")
 
     def test_generate_batch_success(self):
         proxy, worker = self._make_proxy([
@@ -136,11 +127,7 @@ class TestProviderProxy:
         mock_token = MagicMock()
         mock_token.is_cancelled.return_value = True
 
-        import torch
-        mock_ta = MagicMock()
-        mock_ta.load.return_value = (torch.zeros(1, 24000), 24000)
-        with patch.dict("sys.modules", {"torchaudio": mock_ta}):
-            proxy.generate_single("Hello", "/tmp/test.wav", cancellation_token=mock_token)
+        proxy.generate("Hello", "/tmp/test.wav", cancellation_token=mock_token)
 
         # Give the forwarder thread a moment to send
         import time

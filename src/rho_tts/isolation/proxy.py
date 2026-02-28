@@ -8,14 +8,13 @@ main process when they may not be installed.
 
 import logging
 import threading
-from typing import List, Optional
+from typing import List, Optional, Union
 
 from .process_manager import WorkerProcess
 from .protocol import (
     CANCELLED,
     ERROR,
     GENERATE,
-    GENERATE_SINGLE,
     INIT,
     READY,
     RESULT,
@@ -75,53 +74,40 @@ class ProviderProxy:
             raise RuntimeError("Provider not initialized")
         return self._sample_rate
 
-    def generate_single(
-        self,
-        text: str,
-        output_path: str,
-        cancellation_token=None,
-    ):
-        """Generate audio for a single text. Returns the audio tensor or None.
-
-        The worker writes the WAV file to ``output_path``.  We load it back
-        with torchaudio to match BaseTTS's return type.
-        """
-        cancel_stop = threading.Event()
-        if cancellation_token is not None:
-            self._start_cancel_forwarder(cancellation_token, cancel_stop)
-
-        try:
-            resp = self._worker.send(
-                GENERATE_SINGLE,
-                text=text,
-                output_path=output_path,
-            )
-        finally:
-            cancel_stop.set()
-
-        return self._handle_generate_response(resp, output_path)
-
     def generate(
         self,
-        texts: List[str],
-        output_base_path: str,
+        texts: Union[str, List[str]],
+        output_path: str,
         cancellation_token=None,
-    ) -> Optional[List[str]]:
-        """Batch generation. Returns list of output paths or None."""
+    ) -> Union[Optional[str], Optional[List[str]]]:
+        """Generate audio. Accepts a single string or list of strings."""
+        _single_mode = isinstance(texts, str)
+
         cancel_stop = threading.Event()
         if cancellation_token is not None:
             self._start_cancel_forwarder(cancellation_token, cancel_stop)
 
         try:
-            resp = self._worker.send(
-                GENERATE,
-                texts=texts,
-                output_base_path=output_base_path,
-            )
+            if _single_mode:
+                resp = self._worker.send(
+                    GENERATE,
+                    text=texts,
+                    output_path=output_path,
+                )
+            else:
+                resp = self._worker.send(
+                    GENERATE,
+                    texts=texts,
+                    output_base_path=output_path,
+                )
         finally:
             cancel_stop.set()
 
         if resp.get("type") == RESULT:
+            if _single_mode:
+                if not resp.get("success", False):
+                    return None
+                return resp.get("output_path")
             return resp.get("output_paths")
         elif resp.get("type") == CANCELLED:
             return None
@@ -146,29 +132,6 @@ class ProviderProxy:
             pass
 
     # -- Internal helpers --------------------------------------------------
-
-    def _handle_generate_response(self, resp: dict, output_path: str):
-        """Process the worker response for generate_single."""
-        if resp.get("type") == RESULT:
-            if not resp.get("success", False):
-                return None
-            # Load the audio file to match BaseTTS return type
-            try:
-                import torchaudio
-                waveform, _ = torchaudio.load(output_path)
-                return waveform
-            except ImportError:
-                logger.warning(
-                    "torchaudio not available in main env; "
-                    "returning True instead of tensor"
-                )
-                return True
-        elif resp.get("type") == CANCELLED:
-            return None
-        elif resp.get("type") == ERROR:
-            raise RuntimeError(f"Worker error: {resp.get('message')}")
-        else:
-            raise RuntimeError(f"Unexpected response: {resp}")
 
     def _start_cancel_forwarder(
         self,

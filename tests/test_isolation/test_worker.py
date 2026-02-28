@@ -12,7 +12,7 @@ import torch
 from rho_tts.isolation.protocol import (
     CANCELLED,
     ERROR,
-    GENERATE_SINGLE,
+    GENERATE,
     INIT,
     READY,
     RESULT,
@@ -32,8 +32,13 @@ class TestWorkerProtocol:
         # Mock TTS instance
         mock_tts = MagicMock()
         mock_tts.sample_rate = 24000
-        mock_tts.generate_single.return_value = torch.zeros(24000)
-        mock_tts.generate.return_value = ["/tmp/0.wav"]
+
+        def _mock_generate(texts, output_path, cancellation_token=None):
+            if isinstance(texts, str):
+                return output_path
+            return [f"{output_path}_{i}.wav" for i in range(len(texts))]
+
+        mock_tts.generate.side_effect = _mock_generate
 
         with patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", captured_stdout), \
@@ -88,7 +93,7 @@ class TestWorkerProtocol:
     def test_generate_single(self):
         messages = [
             encode_message(INIT, provider="qwen", kwargs={}),
-            encode_message(GENERATE_SINGLE, text="Hello", output_path="/tmp/test.wav"),
+            encode_message(GENERATE, text="Hello", output_path="/tmp/test.wav"),
             encode_message(SHUTDOWN),
         ]
         responses = self._run_worker(messages)

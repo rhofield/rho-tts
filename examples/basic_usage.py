@@ -19,13 +19,13 @@ tts = TTSFactory.get_tts_instance(
     # model_path="/path/to/local/model",  # local model
 )
 
-result = tts.generate_single(
-    text="Hello! This is a test of the text to speech system.",
-    output_path="output_default_voice.wav",
+result = tts.generate(
+    texts=["Hello! This is a test of the text to speech system."],
+    output_base_path="output_default_voice",
 )
 
-if result is not None:
-    print("Generated audio with default voice saved to output_default_voice.wav")
+if result and result[0]:
+    print(f"Generated audio with default voice: {result[0]}")
 else:
     print("Audio generation failed")
 
@@ -37,13 +37,13 @@ tts_cloned = TTSFactory.get_tts_instance(
     reference_text="This is the transcript of my voice sample.",
 )
 
-result = tts_cloned.generate_single(
-    text="Hello! This is a test of the text to speech system.",
-    output_path="output_cloned_voice.wav",
+result = tts_cloned.generate(
+    texts=["Hello! This is a test of the text to speech system."],
+    output_base_path="output_cloned_voice",
 )
 
-if result is not None:
-    print("Generated audio with cloned voice saved to output_cloned_voice.wav")
+if result and result[0]:
+    print(f"Generated audio with cloned voice: {result[0]}")
 else:
     print("Audio generation failed")
 

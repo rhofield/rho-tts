@@ -6,7 +6,7 @@ from rho_tts.isolation.protocol import (
     CANCEL,
     CANCELLED,
     ERROR,
-    GENERATE_SINGLE,
+    GENERATE,
     INIT,
     PING,
     PONG,
@@ -20,7 +20,7 @@ from rho_tts.isolation.protocol import (
 
 class TestProtocolConstants:
     def test_request_types_are_strings(self):
-        for name in (INIT, GENERATE_SINGLE, CANCEL, SHUTDOWN, PING):
+        for name in (INIT, GENERATE, CANCEL, SHUTDOWN, PING):
             assert isinstance(name, str)
 
     def test_response_types_are_strings(self):
@@ -49,14 +49,14 @@ class TestEncodeMessage:
 
     def test_roundtrip(self):
         original = encode_message(
-            GENERATE_SINGLE,
-            text="Hello world",
-            output_path="/tmp/out.wav",
+            GENERATE,
+            texts=["Hello world"],
+            output_base_path="/tmp/out",
         )
         decoded = decode_message(original)
-        assert decoded["type"] == "generate_single"
-        assert decoded["text"] == "Hello world"
-        assert decoded["output_path"] == "/tmp/out.wav"
+        assert decoded["type"] == "generate"
+        assert decoded["texts"] == ["Hello world"]
+        assert decoded["output_base_path"] == "/tmp/out"
 
 
 class TestDecodeMessage:

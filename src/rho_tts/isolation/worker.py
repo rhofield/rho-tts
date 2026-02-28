@@ -27,7 +27,6 @@ from rho_tts.isolation.protocol import (
     CANCELLED,
     ERROR,
     GENERATE,
-    GENERATE_SINGLE,
     INIT,
     PING,
     PONG,
@@ -79,44 +78,24 @@ class Worker:
             logger.error("Init failed: %s", exc)
             self._write(ERROR, message=str(exc))
 
-    def _handle_generate_single(self, msg: dict) -> None:
-        text = msg["text"]
-        output_path = msg["output_path"]
-
-        with self._cancel_lock:
-            self._cancel_token = CancellationToken()
-        token = self._cancel_token
-
-        try:
-            result = self._tts.generate_single(text, output_path, cancellation_token=token)
-            if token.is_cancelled():
-                self._write(CANCELLED)
-            else:
-                self._write(RESULT, output_path=output_path, success=result is not None)
-        except Exception as exc:
-            if token.is_cancelled():
-                self._write(CANCELLED)
-            else:
-                logger.error("generate_single failed: %s", exc)
-                self._write(ERROR, message=str(exc))
-        finally:
-            with self._cancel_lock:
-                self._cancel_token = None
-
     def _handle_generate(self, msg: dict) -> None:
-        texts = msg["texts"]
-        output_base_path = msg["output_base_path"]
+        texts = msg.get("texts") or msg.get("text")
+        output_path = msg.get("output_base_path") or msg.get("output_path")
 
         with self._cancel_lock:
             self._cancel_token = CancellationToken()
         token = self._cancel_token
 
         try:
-            result = self._tts.generate(texts, output_base_path, cancellation_token=token)
+            result = self._tts.generate(texts, output_path, cancellation_token=token)
             if token.is_cancelled():
                 self._write(CANCELLED)
-            else:
+            elif isinstance(result, str):
+                self._write(RESULT, output_path=result, success=True)
+            elif isinstance(result, list):
                 self._write(RESULT, output_paths=result)
+            else:
+                self._write(RESULT, success=False)
         except Exception as exc:
             if token.is_cancelled():
                 self._write(CANCELLED)
@@ -184,8 +163,6 @@ class Worker:
             if msg_type == SHUTDOWN:
                 logger.info("Shutdown received")
                 break
-            elif msg_type == GENERATE_SINGLE:
-                self._handle_generate_single(msg)
             elif msg_type == GENERATE:
                 self._handle_generate(msg)
             else:

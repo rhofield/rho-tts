@@ -25,11 +25,10 @@ tts = TTSFactory.get_tts_instance(
 )
 
 # Generate with full validation loop
-result = tts.generate_single(
-    text="The quick brown fox jumps over the lazy dog.",
-    output_path="cloned_voice_output.wav",
+result = tts.generate(
+    texts=["The quick brown fox jumps over the lazy dog."],
+    output_base_path="cloned_voice_output",
 )
 
-if result is not None:
-    print(f"Voice cloned audio saved successfully!")
-    print(f"Audio tensor shape: {result.shape}")
+if result and result[0]:
+    print(f"Voice cloned audio saved: {result[0]}")
