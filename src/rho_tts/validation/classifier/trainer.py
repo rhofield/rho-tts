@@ -13,7 +13,7 @@ with .wav files.
 """
 import logging
 import os
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -38,7 +38,6 @@ def extract_features(path: str) -> Optional[np.ndarray]:
     """
     try:
         import librosa
-        import parselmouth
         from resemblyzer import preprocess_wav
 
         # Use module-level encoder to avoid reloading
@@ -52,24 +51,49 @@ def extract_features(path: str) -> Optional[np.ndarray]:
         mfcc_mean = np.mean(mfcc, axis=1)
         mfcc_std = np.std(mfcc, axis=1)
 
-        snd = parselmouth.Sound(path)
-        pitch = snd.to_pitch()
-        f0 = pitch.selected_array["frequency"]
-        f0_mean = np.mean(f0[f0 > 0]) if np.any(f0 > 0) else 0
-        f0_std = np.std(f0[f0 > 0]) if np.any(f0 > 0) else 0
+        f0, _, _ = librosa.pyin(y, fmin=librosa.note_to_hz('C2'), fmax=librosa.note_to_hz('C7'))
+        f0_voiced = f0[~np.isnan(f0)]
+        f0_mean = float(np.mean(f0_voiced)) if len(f0_voiced) > 0 else 0.0
+        f0_std = float(np.std(f0_voiced)) if len(f0_voiced) > 0 else 0.0
 
-        formants = snd.to_formant_burg()
-        f1 = formants.get_value_at_time(1, 0.5)
-        f2 = formants.get_value_at_time(2, 0.5)
+        f1, f2 = _estimate_formants(y, sr)
 
         return np.concatenate([
             embed,
             mfcc_mean, mfcc_std,
-            [f0_mean, f0_std, f1 or 0, f2 or 0]
+            [f0_mean, f0_std, f1, f2]
         ])
     except Exception as e:
         logger.error(f"Error processing {path}: {e}")
         return None
+
+
+def _estimate_formants(y: np.ndarray, sr: int) -> tuple:
+    """Estimate F1 and F2 using LPC analysis on a mid-file frame."""
+    import librosa
+
+    # Pre-emphasis to flatten spectral tilt before LPC
+    y_pre = np.append(y[0], y[1:] - 0.97 * y[:-1])
+
+    # 25 ms Hann-windowed frame from the midpoint
+    frame_len = int(0.025 * sr)
+    center = len(y_pre) // 2
+    frame = y_pre[max(0, center - frame_len // 2):center + frame_len // 2]
+    frame = frame * np.hanning(len(frame))
+
+    # LPC order: 1 pole-pair per kHz + 2 for glottal/lip radiation
+    order = max(12, sr // 1000 + 2)
+    A = librosa.lpc(frame, order=order)
+
+    # Formants are roots of A with positive imaginary part (upper half-plane)
+    roots = np.roots(A)
+    roots = roots[roots.imag > 0]
+    freqs = np.sort(np.angle(roots) * (sr / (2 * np.pi)))
+    freqs = freqs[(freqs > 90) & (freqs < sr / 4)]
+
+    f1 = float(freqs[0]) if len(freqs) > 0 else 0.0
+    f2 = float(freqs[1]) if len(freqs) > 1 else 0.0
+    return f1, f2
 
 
 # Lazy-loaded voice encoder singleton
@@ -85,7 +109,11 @@ def _get_encoder():
     return _encoder
 
 
-def train(dataset_dir: str, output_path: Optional[str] = None):
+def train(
+    dataset_dir: str,
+    output_path: Optional[str] = None,
+    progress_callback: Optional[Callable[[str], None]] = None,
+):
     """
     Train the voice quality classifier.
 
@@ -93,6 +121,7 @@ def train(dataset_dir: str, output_path: Optional[str] = None):
         dataset_dir: Directory containing 'good/' and 'bad/' subdirectories with .wav files
         output_path: Path to save the trained model. Defaults to voice_quality_model.pkl
             in the classifier package directory.
+        progress_callback: Optional callable receiving progress messages as training proceeds.
     """
     from datetime import datetime
 
@@ -107,25 +136,52 @@ def train(dataset_dir: str, output_path: Optional[str] = None):
 
     logger.info("Voice Quality Classifier Training")
 
+    # Pre-scan both folders to get total file count for progress reporting
+    PROGRESS_INTERVAL = 10
+    all_wav: list[tuple[str, str]] = []
+    for folder in ["good", "bad"]:
+        fp = os.path.join(dataset_dir, folder)
+        if os.path.exists(fp):
+            all_wav.extend((folder, f) for f in sorted(os.listdir(fp)) if f.endswith(".wav"))
+    total_files = len(all_wav)
+
     # Load data
     X, y = [], []
+    file_index = 0
     for label, folder in enumerate(["good", "bad"]):
         folder_path = os.path.join(dataset_dir, folder)
         if not os.path.exists(folder_path):
             raise FileNotFoundError(f"Dataset folder not found: {folder_path}")
 
         logger.info(f"Loading from: {folder_path}")
-        for f in sorted(os.listdir(folder_path)):
-            if not f.endswith(".wav"):
-                continue
+        wav_files = [f for f in sorted(os.listdir(folder_path)) if f.endswith(".wav")]
+        count = 0
+        for i, f in enumerate(wav_files):
+            file_index += 1
             path = os.path.join(folder_path, f)
             feat = extract_features(path)
             if feat is not None:
                 X.append(feat)
                 y.append(label)
+                count += 1
+            is_last = (i == len(wav_files) - 1)
+            pct = file_index * 100 // total_files if total_files else 0
+            if file_index % PROGRESS_INTERVAL == 0 or is_last:
+                msg = f"Extracting: {file_index}/{total_files} ({pct}%) — {folder}/{f}"
+                logger.info(msg)
+                if progress_callback:
+                    progress_callback(msg)
+
+        summary = f"Loaded {count} files from {folder}/"
+        logger.info(summary)
+        if progress_callback:
+            progress_callback(summary)
 
     X, y = np.array(X), np.array(y)
-    logger.info(f"Loaded {len(X)} samples ({np.sum(y == 0)} good, {np.sum(y == 1)} bad)")
+    n_good, n_bad = int(np.sum(y == 0)), int(np.sum(y == 1))
+    logger.info(f"Loaded {len(X)} samples ({n_good} good, {n_bad} bad)")
+    if progress_callback:
+        progress_callback(f"Loaded {len(X)} samples ({n_good} good, {n_bad} bad)")
 
     # Train/test split
     X_train, X_test, y_train, y_test = train_test_split(
@@ -154,8 +210,12 @@ def train(dataset_dir: str, output_path: Optional[str] = None):
     )
 
     model = CalibratedClassifierCV(base_model, method='isotonic', cv=5)
+    if progress_callback:
+        progress_callback("Training model (this may take a moment)...")
     model.fit(X_train, y_train)
     logger.info("Training completed!")
+    if progress_callback:
+        progress_callback("Training complete! Optimizing threshold...")
 
     # Find optimal threshold
     probs = model.predict_proba(X_test)[:, 1]
@@ -174,6 +234,8 @@ def train(dataset_dir: str, output_path: Optional[str] = None):
             optimal_threshold = thresh
 
     brier = brier_score_loss(y_test, probs)
+    if progress_callback:
+        progress_callback(f"Optimal threshold: {optimal_threshold:.3f}")
 
     # Save model
     model_metadata = {
@@ -189,6 +251,8 @@ def train(dataset_dir: str, output_path: Optional[str] = None):
     }
     joblib.dump(model_metadata, output_path)
     logger.info(f"Model saved to {output_path} (threshold: {optimal_threshold:.3f}, brier: {brier:.4f})")
+    if progress_callback:
+        progress_callback(f"Model saved to {output_path} (threshold: {optimal_threshold:.3f}, brier: {brier:.4f})")
 
 
 if __name__ == "__main__":

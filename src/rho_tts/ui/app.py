@@ -1,11 +1,12 @@
 """
 Gradio Blocks application for the rho-tts web UI.
 
-Four-tab layout:
-  1. Generate — model/voice selection, text input, audio playback, phonetic mappings
-  2. Voices  — manage voice profiles (upload reference audio, set transcript)
-  3. Models  — manage model configurations (provider params, thresholds)
-  4. Library — browse, filter, and replay past generations
+Five-tab layout:
+  1. Generate  — model/voice selection, text input, audio playback, phonetic mappings
+  2. Voices   — manage voice profiles (upload reference audio, set transcript)
+  3. Models   — manage model configurations (provider params, thresholds)
+  4. Training — train the accent drift classifier on labeled audio
+  5. Library  — browse, filter, and replay past generations
 """
 
 import argparse
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 def _build_app(state: AppState) -> gr.Blocks:
     """Construct the Gradio Blocks UI and wire all events."""
 
-    with gr.Blocks(title="rho-tts Studio", theme=gr.themes.Soft()) as app:
+    with gr.Blocks(title="rho-tts Studio") as app:
 
         # ── shared helpers ──────────────────────────────────────────
 
@@ -92,7 +93,7 @@ def _build_app(state: AppState) -> gr.Blocks:
                 mapping_label = gr.Markdown("Select a voice and model to load mappings.")
                 mapping_df = gr.Dataframe(
                     headers=["Word", "Pronunciation"],
-                    col_count=(2, "fixed"),
+                    column_count=(2, "fixed"),
                     interactive=True,
                     row_count=(3, "dynamic"),
                     label="Phonetic Mappings",
@@ -100,6 +101,30 @@ def _build_app(state: AppState) -> gr.Blocks:
                 with gr.Row():
                     save_mapping_btn = gr.Button("Save Mappings")
                     mapping_status = gr.Textbox(label="", interactive=False, show_label=False)
+
+            # -- Parameters accordion --
+            with gr.Accordion("Parameters", open=False):
+                params_label = gr.Markdown("Select a voice and model to load parameters.")
+                with gr.Row():
+                    params_seed = gr.Number(label="seed", value=789, precision=0)
+                    params_max_iter = gr.Number(label="max_iterations", value=10, precision=0)
+                with gr.Row():
+                    params_accent = gr.Slider(
+                        label="accent_drift_threshold", minimum=0, maximum=1, step=0.01, value=0.17,
+                    )
+                    params_text_sim = gr.Slider(
+                        label="text_similarity_threshold", minimum=0, maximum=1, step=0.01, value=0.85,
+                    )
+                with gr.Row():
+                    params_temperature = gr.Slider(
+                        label="temperature", minimum=0.1, maximum=2.0, step=0.05, value=1.0, visible=False,
+                    )
+                    params_cfg_weight = gr.Slider(
+                        label="cfg_weight", minimum=0.1, maximum=1.0, step=0.05, value=0.6, visible=False,
+                    )
+                with gr.Row():
+                    save_params_btn = gr.Button("Save Parameters")
+                    params_status = gr.Textbox(label="", interactive=False, show_label=False)
 
             # -- Generate tab events --
 
@@ -111,35 +136,72 @@ def _build_app(state: AppState) -> gr.Blocks:
             device_dd.change(fn=_on_device_change, inputs=[device_dd])
 
             def _on_voice_change(voice_id, model_id):
-                """Reload phonetic mapping when voice changes."""
-                rows, label = callbacks.load_phonetic_mapping(state, voice_id, model_id)
-                return rows, label
+                """Reload phonetic mapping and params when voice changes."""
+                rows, mapping_label_val = callbacks.load_phonetic_mapping(state, voice_id, model_id)
+                seed, max_iter, accent, text_sim, temp, cfg, plabel, is_cb = \
+                    callbacks.load_model_voice_params(state, voice_id, model_id)
+                return (
+                    rows, mapping_label_val,
+                    seed, max_iter, accent, text_sim,
+                    gr.update(value=temp, visible=is_cb),
+                    gr.update(value=cfg, visible=is_cb),
+                    plabel,
+                )
 
             def _on_model_change(voice_id, model_id):
-                """Filter voices for provider and reload phonetic mapping."""
+                """Filter voices for provider and reload phonetic mapping and params."""
                 choices = callbacks.voice_choices_for_model(state.config, model_id)
                 valid_ids = {c[1] for c in choices}
                 new_voice_id = voice_id if voice_id in valid_ids else None
-                rows, label = callbacks.load_phonetic_mapping(
+                rows, mapping_label_val = callbacks.load_phonetic_mapping(
                     state, new_voice_id, model_id,
                 )
+                seed, max_iter, accent, text_sim, temp, cfg, plabel, is_cb = \
+                    callbacks.load_model_voice_params(state, new_voice_id, model_id)
                 status = callbacks.status_for_model_voice(state.config, model_id, choices)
                 return (
                     gr.Dropdown(choices=choices, value=new_voice_id),
                     rows,
-                    label,
+                    mapping_label_val,
                     status,
+                    seed, max_iter, accent, text_sim,
+                    gr.update(value=temp, visible=is_cb),
+                    gr.update(value=cfg, visible=is_cb),
+                    plabel,
                 )
 
             voice_dd.change(
                 fn=_on_voice_change,
                 inputs=[voice_dd, model_dd],
-                outputs=[mapping_df, mapping_label],
+                outputs=[
+                    mapping_df, mapping_label,
+                    params_seed, params_max_iter, params_accent, params_text_sim,
+                    params_temperature, params_cfg_weight, params_label,
+                ],
             )
             model_dd.change(
                 fn=_on_model_change,
                 inputs=[voice_dd, model_dd],
-                outputs=[voice_dd, mapping_df, mapping_label, status_box],
+                outputs=[
+                    voice_dd, mapping_df, mapping_label, status_box,
+                    params_seed, params_max_iter, params_accent, params_text_sim,
+                    params_temperature, params_cfg_weight, params_label,
+                ],
+            )
+
+            def _save_params(voice_id, model_id, seed, max_iter, accent, text_sim, temp, cfg):
+                return callbacks.save_model_voice_params(
+                    state, voice_id, model_id, seed, max_iter, accent, text_sim, temp, cfg,
+                )
+
+            save_params_btn.click(
+                fn=_save_params,
+                inputs=[
+                    voice_dd, model_dd,
+                    params_seed, params_max_iter, params_accent, params_text_sim,
+                    params_temperature, params_cfg_weight,
+                ],
+                outputs=[params_status],
             )
 
             def _generate(model_id, voice_id, text):
@@ -470,7 +532,45 @@ def _build_app(state: AppState) -> gr.Blocks:
                 outputs=[m_table, m_status, model_dd, voice_dd, m_del_dd, m_edit_dd],
             )
 
-        # ── Tab 4: Library ──────────────────────────────────────────
+        # ── Tab 4: Training ─────────────────────────────────────────
+
+        with gr.Tab("Training"):
+            gr.Markdown("## Accent Drift Classifier Training")
+            gr.Markdown(
+                "Train the classifier on labeled `.wav` samples.\n\n"
+                "Dataset must contain two subdirectories:\n"
+                "- `good/` — samples **without** accent drift\n"
+                "- `bad/`  — samples **with** accent drift"
+            )
+            with gr.Row():
+                t_dataset_dir = gr.Textbox(
+                    label="Dataset Directory",
+                    placeholder="/path/to/dataset",
+                    scale=3,
+                )
+                t_output_path = gr.Textbox(
+                    label="Output Path (optional)",
+                    placeholder="Default: voice_quality_model.pkl in package dir",
+                    scale=2,
+                )
+            t_train_btn = gr.Button("Train Classifier", variant="primary")
+            t_log = gr.Textbox(
+                label="Training Log",
+                lines=12,
+                interactive=False,
+            )
+            t_status = gr.Textbox(label="", interactive=False, show_label=False)
+
+            def _do_train(ds, op):
+                yield from callbacks.train_classifier(state, ds, op)
+
+            t_train_btn.click(
+                fn=_do_train,
+                inputs=[t_dataset_dir, t_output_path],
+                outputs=[t_log, t_status],
+            )
+
+        # ── Tab 5: Library ──────────────────────────────────────────
 
         with gr.Tab("Library") as library_tab:
             gr.Markdown("### Audio Library")
@@ -677,4 +777,4 @@ def launch_ui(
     )
 
     app = _build_app(state)
-    app.launch(server_name=args.host, server_port=args.port, share=args.share)
+    app.launch(server_name=args.host, server_port=args.port, share=args.share, theme=gr.themes.Soft())

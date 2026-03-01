@@ -48,7 +48,6 @@ validation = [
     "scikit-learn>=1.3",
     "joblib",
     "librosa>=0.10",
-    "parselmouth",
     "num2words",
     "word2number",
 ]

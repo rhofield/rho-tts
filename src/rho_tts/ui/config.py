@@ -264,6 +264,7 @@ class AppConfig:
     voices: Dict[str, VoiceProfile] = field(default_factory=dict)
     models: Dict[str, ModelConfig] = field(default_factory=dict)
     phonetic_mappings: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    model_voice_params: Dict[str, Dict] = field(default_factory=dict)
     output_dir: str = "./rho_tts_output"
     device: str = "cuda"
 
@@ -272,6 +273,7 @@ class AppConfig:
             "voices": {k: v.to_dict() for k, v in self.voices.items()},
             "models": {k: v.to_dict() for k, v in self.models.items()},
             "phonetic_mappings": self.phonetic_mappings,
+            "model_voice_params": self.model_voice_params,
             "output_dir": self.output_dir,
             "device": self.device,
         }
@@ -284,6 +286,7 @@ class AppConfig:
             voices=voices,
             models=models,
             phonetic_mappings=data.get("phonetic_mappings", {}),
+            model_voice_params=data.get("model_voice_params", {}),
             output_dir=data.get("output_dir", "./rho_tts_output"),
             device=data.get("device", "cuda"),
         )

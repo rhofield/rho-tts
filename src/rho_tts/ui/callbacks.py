@@ -144,6 +144,122 @@ def cancel_generation(state: AppState) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Per-voice+model parameters
+# ---------------------------------------------------------------------------
+
+PARAM_DEFAULTS = {
+    "seed": 789,
+    "max_iterations": 10,
+    "accent_drift_threshold": 0.17,
+    "text_similarity_threshold": 0.85,
+    "temperature": 1.0,
+    "cfg_weight": 0.6,
+}
+
+
+def load_model_voice_params(
+    state: AppState,
+    voice_id: Optional[str],
+    model_id: Optional[str],
+) -> tuple:
+    """
+    Load per-voice+model parameter overrides.
+
+    Returns:
+        (seed, max_iterations, accent_drift_threshold, text_similarity_threshold,
+         temperature, cfg_weight, label, is_chatterbox)
+    """
+    if not voice_id or not model_id:
+        return (
+            PARAM_DEFAULTS["seed"],
+            PARAM_DEFAULTS["max_iterations"],
+            PARAM_DEFAULTS["accent_drift_threshold"],
+            PARAM_DEFAULTS["text_similarity_threshold"],
+            PARAM_DEFAULTS["temperature"],
+            PARAM_DEFAULTS["cfg_weight"],
+            "Select a voice and model to load parameters.",
+            False,
+        )
+
+    model_cfg = state.config.models.get(model_id)
+    if model_cfg is None:
+        return (
+            PARAM_DEFAULTS["seed"],
+            PARAM_DEFAULTS["max_iterations"],
+            PARAM_DEFAULTS["accent_drift_threshold"],
+            PARAM_DEFAULTS["text_similarity_threshold"],
+            PARAM_DEFAULTS["temperature"],
+            PARAM_DEFAULTS["cfg_weight"],
+            "Select a voice and model to load parameters.",
+            False,
+        )
+
+    is_chatterbox = model_cfg.provider == "chatterbox"
+
+    # Fall back chain: saved overrides → model params → provider defaults
+    key = get_phonetic_key(voice_id, model_id)
+    saved = state.config.model_voice_params.get(key, {})
+
+    def _get(param: str):
+        if param in saved:
+            return saved[param]
+        if param in model_cfg.params:
+            return model_cfg.params[param]
+        return PARAM_DEFAULTS[param]
+
+    voice_name = voice_id
+    model_name = model_id
+    builtin = get_builtin_voice(voice_id)
+    if builtin:
+        voice_name = builtin.name
+    elif voice_id in state.config.voices:
+        voice_name = state.config.voices[voice_id].name
+    if model_id in state.config.models:
+        model_name = state.config.models[model_id].name
+
+    label = f"Parameters for: {voice_name} + {model_name}"
+    return (
+        _get("seed"),
+        _get("max_iterations"),
+        _get("accent_drift_threshold"),
+        _get("text_similarity_threshold"),
+        _get("temperature"),
+        _get("cfg_weight"),
+        label,
+        is_chatterbox,
+    )
+
+
+def save_model_voice_params(
+    state: AppState,
+    voice_id: Optional[str],
+    model_id: Optional[str],
+    seed: Optional[float],
+    max_iterations: Optional[float],
+    accent_drift_threshold: Optional[float],
+    text_similarity_threshold: Optional[float],
+    temperature: Optional[float],
+    cfg_weight: Optional[float],
+) -> str:
+    """Save per-voice+model parameter overrides to config."""
+    if not voice_id or not model_id:
+        return "Select a voice and model first."
+
+    key = get_phonetic_key(voice_id, model_id)
+    state.config.model_voice_params[key] = {
+        "seed": int(seed) if seed is not None else PARAM_DEFAULTS["seed"],
+        "max_iterations": int(max_iterations) if max_iterations is not None else PARAM_DEFAULTS["max_iterations"],
+        "accent_drift_threshold": float(accent_drift_threshold) if accent_drift_threshold is not None else PARAM_DEFAULTS["accent_drift_threshold"],
+        "text_similarity_threshold": float(text_similarity_threshold) if text_similarity_threshold is not None else PARAM_DEFAULTS["text_similarity_threshold"],
+        "temperature": float(temperature) if temperature is not None else PARAM_DEFAULTS["temperature"],
+        "cfg_weight": float(cfg_weight) if cfg_weight is not None else PARAM_DEFAULTS["cfg_weight"],
+    }
+    state.save()
+    state.invalidate_tts()
+    return "Parameters saved."
+
+
+# ---------------------------------------------------------------------------
 # Phonetic mapping
 # ---------------------------------------------------------------------------
 
@@ -256,6 +372,11 @@ def delete_voice(state: AppState, voice_id: str) -> tuple[list[list[str]], str]:
     for k in keys_to_remove:
         del state.config.phonetic_mappings[k]
 
+    # Remove associated voice+model params
+    keys_to_remove = [k for k in state.config.model_voice_params if k.startswith(f"{voice_id}::")]
+    for k in keys_to_remove:
+        del state.config.model_voice_params[k]
+
     state.save()
     state.invalidate_tts()
     return _voices_table(state.config), f"Deleted voice '{profile.name}'."
@@ -341,6 +462,11 @@ def delete_model(state: AppState, model_id: str) -> tuple[list[list[str]], str]:
     keys_to_remove = [k for k in state.config.phonetic_mappings if k.endswith(f"::{model_id}")]
     for k in keys_to_remove:
         del state.config.phonetic_mappings[k]
+
+    # Remove associated voice+model params
+    keys_to_remove = [k for k in state.config.model_voice_params if k.endswith(f"::{model_id}")]
+    for k in keys_to_remove:
+        del state.config.model_voice_params[k]
 
     state.save()
     state.invalidate_tts()
@@ -602,3 +728,66 @@ def library_clear_history(state: AppState) -> str:
     """Clear all library history."""
     count = state.clear_history()
     return f"Cleared {count} record(s)."
+
+
+# ---------------------------------------------------------------------------
+# Training tab
+# ---------------------------------------------------------------------------
+
+
+def train_classifier(
+    state: AppState,
+    dataset_dir: str,
+    output_path: str,
+):
+    """
+    Generator that runs classifier training in a background thread,
+    streaming log lines to the UI via yield.
+
+    Yields:
+        (log_text, status_message)
+    """
+    import queue
+    import threading
+
+    from ..validation.classifier.trainer import train
+
+    if not dataset_dir or not dataset_dir.strip():
+        yield "", "Error: Dataset directory is required."
+        return
+
+    dataset_dir = dataset_dir.strip()
+    output_path = output_path.strip() if output_path and output_path.strip() else None
+
+    q = queue.Queue()
+    log_lines = []
+
+    def on_progress(msg: str):
+        q.put(("log", msg))
+
+    def run():
+        try:
+            train(dataset_dir, output_path, progress_callback=on_progress)
+            q.put(("done", "Training complete!"))
+        except FileNotFoundError as e:
+            q.put(("error", str(e)))
+        except Exception as e:
+            q.put(("error", f"Training failed: {e}"))
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+
+    while True:
+        kind, msg = q.get()
+        if kind == "log":
+            log_lines.append(msg)
+            # Show live progress in status bar; fall back to generic message
+            if msg.startswith("Extracting:"):
+                status = msg.split(" — ")[0]   # e.g. "Extracting: 182/1822 (10%)"
+            else:
+                status = "Training..."
+            yield "\n".join(log_lines), status
+        elif kind in ("done", "error"):
+            log_lines.append(msg)
+            yield "\n".join(log_lines), msg
+            break

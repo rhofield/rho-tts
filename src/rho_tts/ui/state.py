@@ -83,6 +83,13 @@ class AppState:
                 **model_config.params,
             }
 
+            # Apply per-voice+model parameter overrides (after model defaults)
+            if voice_profile:
+                params_key = get_phonetic_key(voice_profile.id, model_config.id)
+                voice_model_params = self.config.model_voice_params.get(params_key, {})
+                if voice_model_params:
+                    kwargs.update(voice_model_params)
+
             if voice_profile:
                 phonetic_key = get_phonetic_key(voice_profile.id, model_config.id)
                 phonetic_mapping = self.config.phonetic_mappings.get(phonetic_key, {})
