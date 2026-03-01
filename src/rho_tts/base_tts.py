@@ -589,7 +589,7 @@ class BaseTTS(ABC):
                         del audio
                         if torch.cuda.is_available():
                             torch.cuda.empty_cache()
-                    else:  # noqa: E225 — for/else: runs when loop exhausts without break
+                    else:  # for/else: runs when the loop exhausts without a break
                         if best_audio is not None:
                             logger.warning(
                                 f"    Segment {seg_idx + 1}: max iterations reached, "

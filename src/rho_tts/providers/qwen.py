@@ -29,7 +29,7 @@ class QwenTTS(BaseTTS):
         reference_text: Transcript of the reference audio (required when reference_audio is set)
         model_path: Path to local model or HuggingFace model ID
             (default: "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
-        max_chars_per_text: Maximum characters per text segment (default: 6000)
+        max_chars_per_segment: Maximum characters per text segment (default: 1000)
         batch_size: Number of texts to process per batch (default: 5)
         max_iterations: Maximum validation retry iterations (default: 10)
         accent_drift_threshold: Threshold for accent drift validation (default: 0.17)
@@ -48,7 +48,7 @@ class QwenTTS(BaseTTS):
         speaker: Optional[str] = None,
         language: str = "English",
         model_path: str = "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
-        max_chars_per_text: int = 1000,
+        max_chars_per_segment: int = 1000,
         batch_size: int = 5,
         max_iterations: int = 10,
         accent_drift_threshold: float = 0.17,
@@ -69,7 +69,7 @@ class QwenTTS(BaseTTS):
         self.model_path = model_path
 
         # Configurable thresholds
-        self.max_chars_per_segment = max_chars_per_text
+        self.max_chars_per_segment = max_chars_per_segment
         self.batch_size = batch_size
         self.force_sentence_split = False
         self.max_iterations = max_iterations

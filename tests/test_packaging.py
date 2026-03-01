@@ -30,11 +30,6 @@ class StubTTS(BaseTTS):
     def _generate_audio(self, text, **kwargs):
         return torch.randn(self._sample_rate)
 
-    def generate(self, texts, output_path, cancellation_token=None):
-        if isinstance(texts, str):
-            return output_path
-        return [f"{output_path}_{i}.wav" for i in range(len(texts))]
-
 
 # ---------------------------------------------------------------------------
 # Public API surface

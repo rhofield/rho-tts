@@ -8,6 +8,8 @@ rho-tts backend (TTSFactory, BaseTTS, CancellationToken).
 
 import logging
 import os
+import queue
+import threading
 import time
 import uuid
 import wave
@@ -245,14 +247,17 @@ def save_model_voice_params(
     if not voice_id or not model_id:
         return "Select a voice and model first."
 
+    def _val(key, cast, raw):
+        return cast(raw) if raw is not None else PARAM_DEFAULTS[key]
+
     key = get_phonetic_key(voice_id, model_id)
     state.config.model_voice_params[key] = {
-        "seed": int(seed) if seed is not None else PARAM_DEFAULTS["seed"],
-        "max_iterations": int(max_iterations) if max_iterations is not None else PARAM_DEFAULTS["max_iterations"],
-        "accent_drift_threshold": float(accent_drift_threshold) if accent_drift_threshold is not None else PARAM_DEFAULTS["accent_drift_threshold"],
-        "text_similarity_threshold": float(text_similarity_threshold) if text_similarity_threshold is not None else PARAM_DEFAULTS["text_similarity_threshold"],
-        "temperature": float(temperature) if temperature is not None else PARAM_DEFAULTS["temperature"],
-        "cfg_weight": float(cfg_weight) if cfg_weight is not None else PARAM_DEFAULTS["cfg_weight"],
+        "seed":                     _val("seed", int, seed),
+        "max_iterations":           _val("max_iterations", int, max_iterations),
+        "accent_drift_threshold":   _val("accent_drift_threshold", float, accent_drift_threshold),
+        "text_similarity_threshold": _val("text_similarity_threshold", float, text_similarity_threshold),
+        "temperature":              _val("temperature", float, temperature),
+        "cfg_weight":               _val("cfg_weight", float, cfg_weight),
     }
     state.save()
     state.invalidate_tts()
@@ -747,9 +752,6 @@ def train_classifier(
     Yields:
         (log_text, status_message)
     """
-    import queue
-    import threading
-
     from ..validation.classifier.trainer import train
 
     if not dataset_dir or not dataset_dir.strip():

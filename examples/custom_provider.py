@@ -12,7 +12,7 @@ The base class provides generate() with text splitting, segment
 joining, phonetic mapping, and validation/retry out of the box.
 Override _post_process_audio() to add custom audio post-processing.
 """
-from typing import Dict, List, Optional, Union
+from typing import Dict, Optional
 
 import torch
 
@@ -35,20 +35,12 @@ class MyCustomTTS(BaseTTS):
         self._sample_rate = 24000
         print(f"MyCustomTTS initialized with param: {my_custom_param}")
 
-    def _generate_audio(self, text: Union[str, List[str]], **kwargs) -> Union[torch.Tensor, List[torch.Tensor]]:
+    def _generate_audio(self, text: str, **kwargs) -> torch.Tensor:
         """Generate audio using your custom model."""
-        # Replace this with your actual model inference
-        is_single = isinstance(text, str)
-        text_list = [text] if is_single else text
-
-        results = []
-        for t in text_list:
-            # Placeholder: generate 2 seconds of silence
-            duration_samples = self._sample_rate * 2
-            audio = torch.zeros(duration_samples)
-            results.append(audio)
-
-        return results[0] if is_single else results
+        # Replace this with your actual model inference.
+        # BaseTTS.generate() always calls this with a single string.
+        # Placeholder: generate 2 seconds of silence
+        return torch.zeros(self._sample_rate * 2)
 
     @property
     def sample_rate(self) -> int:

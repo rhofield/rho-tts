@@ -83,12 +83,19 @@ class AppState:
                 **model_config.params,
             }
 
-            # Apply per-voice+model parameter overrides (after model defaults)
+            # Apply per-voice+model parameter overrides (after model defaults).
+            # Filter out chatterbox-specific params for other providers to avoid
+            # passing unknown kwargs to constructors that don't accept them.
             if voice_profile:
                 params_key = get_phonetic_key(voice_profile.id, model_config.id)
                 voice_model_params = self.config.model_voice_params.get(params_key, {})
                 if voice_model_params:
-                    kwargs.update(voice_model_params)
+                    _CHATTERBOX_ONLY = {"temperature", "cfg_weight"}
+                    filtered = {
+                        k: v for k, v in voice_model_params.items()
+                        if k not in _CHATTERBOX_ONLY or model_config.provider == "chatterbox"
+                    }
+                    kwargs.update(filtered)
 
             if voice_profile:
                 phonetic_key = get_phonetic_key(voice_profile.id, model_config.id)
