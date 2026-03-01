@@ -67,6 +67,9 @@ class BaseTTS(ABC):
         self.force_sentence_split = True
         self.inter_sentence_pause_sec = 0.1
 
+        # Voice ID for per-voice classifier model lookup (set by UI state)
+        self.voice_id: Optional[str] = None
+
         # Voice encoder for speaker similarity validation (lazy loaded)
         self._voice_encoder = None
         self.reference_embedding = None
@@ -122,7 +125,7 @@ class BaseTTS(ABC):
             return 0.0, True
         try:
             from .validation.classifier import predict_accent_drift_probability
-            drift_prob = predict_accent_drift_probability(audio_path)
+            drift_prob = predict_accent_drift_probability(audio_path, voice_id=self.voice_id)
             if drift_prob is None:
                 return 0.0, True
             return drift_prob, drift_prob < self.accent_drift_threshold

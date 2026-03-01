@@ -534,7 +534,7 @@ def _build_app(state: AppState) -> gr.Blocks:
 
         # ── Tab 4: Training ─────────────────────────────────────────
 
-        with gr.Tab("Training"):
+        with gr.Tab("Training") as training_tab:
             gr.Markdown("## Accent Drift Classifier Training")
             gr.Markdown(
                 "Train the classifier on labeled `.wav` samples.\n\n"
@@ -542,17 +542,16 @@ def _build_app(state: AppState) -> gr.Blocks:
                 "- `good/` — samples **without** accent drift\n"
                 "- `bad/`  — samples **with** accent drift"
             )
-            with gr.Row():
-                t_dataset_dir = gr.Textbox(
-                    label="Dataset Directory",
-                    placeholder="/path/to/dataset",
-                    scale=3,
-                )
-                t_output_path = gr.Textbox(
-                    label="Output Path (optional)",
-                    placeholder="Default: voice_quality_model.pkl in package dir",
-                    scale=2,
-                )
+            _train_voice_choices = callbacks.voice_choices(state.config)
+            t_voice_dd = gr.Dropdown(
+                choices=_train_voice_choices,
+                label="Voice",
+                interactive=True,
+            )
+            t_dataset_dir = gr.Textbox(
+                label="Dataset Directory",
+                placeholder="/path/to/dataset",
+            )
             t_train_btn = gr.Button("Train Classifier", variant="primary")
             t_log = gr.Textbox(
                 label="Training Log",
@@ -561,14 +560,19 @@ def _build_app(state: AppState) -> gr.Blocks:
             )
             t_status = gr.Textbox(label="", interactive=False, show_label=False)
 
-            def _do_train(ds, op):
-                yield from callbacks.train_classifier(state, ds, op)
+            def _do_train(voice_id, ds):
+                yield from callbacks.train_classifier(state, voice_id, ds)
 
             t_train_btn.click(
                 fn=_do_train,
-                inputs=[t_dataset_dir, t_output_path],
+                inputs=[t_voice_dd, t_dataset_dir],
                 outputs=[t_log, t_status],
             )
+
+        def _on_training_tab():
+            return gr.Dropdown(choices=callbacks.voice_choices(state.config))
+
+        training_tab.select(fn=_on_training_tab, outputs=[t_voice_dd])
 
         # ── Tab 5: Library ──────────────────────────────────────────
 

@@ -742,24 +742,29 @@ def library_clear_history(state: AppState) -> str:
 
 def train_classifier(
     state: AppState,
+    voice_id: str,
     dataset_dir: str,
-    output_path: str,
 ):
     """
     Generator that runs classifier training in a background thread,
     streaming log lines to the UI via yield.
 
+    The trained model is saved to ~/.rho_tts/models/{voice_id}_classifier.pkl.
+
     Yields:
         (log_text, status_message)
     """
+    from ..validation.classifier import get_model_path
     from ..validation.classifier.trainer import train
 
+    if not voice_id:
+        yield "", "Error: Please select a voice."
+        return
     if not dataset_dir or not dataset_dir.strip():
         yield "", "Error: Dataset directory is required."
         return
 
     dataset_dir = dataset_dir.strip()
-    output_path = output_path.strip() if output_path and output_path.strip() else None
 
     q = queue.Queue()
     log_lines = []
@@ -769,8 +774,9 @@ def train_classifier(
 
     def run():
         try:
-            train(dataset_dir, output_path, progress_callback=on_progress)
-            q.put(("done", "Training complete!"))
+            train(dataset_dir, voice_id=voice_id, progress_callback=on_progress)
+            saved_path = get_model_path(voice_id)
+            q.put(("done", f"Training complete! Model saved to {saved_path}"))
         except FileNotFoundError as e:
             q.put(("error", str(e)))
         except Exception as e:

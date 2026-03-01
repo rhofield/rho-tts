@@ -123,6 +123,7 @@ class AppState:
                 provider=model_config.provider,
                 **kwargs,
             )
+            self._active_tts.voice_id = voice_profile.id if voice_profile else None
             self._cache_key = new_key
             return self._active_tts
 

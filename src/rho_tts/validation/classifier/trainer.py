@@ -111,6 +111,7 @@ def _get_encoder():
 
 def train(
     dataset_dir: str,
+    voice_id: Optional[str] = None,
     output_path: Optional[str] = None,
     progress_callback: Optional[Callable[[str], None]] = None,
 ):
@@ -119,8 +120,11 @@ def train(
 
     Args:
         dataset_dir: Directory containing 'good/' and 'bad/' subdirectories with .wav files
-        output_path: Path to save the trained model. Defaults to voice_quality_model.pkl
-            in the classifier package directory.
+        voice_id: Voice ID to associate with this model. When given and output_path is None,
+            the model is saved to ~/.rho_tts/models/{voice_id}_classifier.pkl.
+        output_path: Explicit path to save the trained model. When both voice_id and
+            output_path are None, defaults to voice_quality_model.pkl in the classifier
+            package directory (legacy global model).
         progress_callback: Optional callable receiving progress messages as training proceeds.
     """
     from datetime import datetime
@@ -132,7 +136,12 @@ def train(
     from sklearn.model_selection import train_test_split
 
     if output_path is None:
-        output_path = os.path.join(os.path.dirname(__file__), "voice_quality_model.pkl")
+        if voice_id is not None:
+            models_dir = os.path.join(os.path.expanduser("~"), ".rho_tts", "models")
+            os.makedirs(models_dir, exist_ok=True)
+            output_path = os.path.join(models_dir, f"{voice_id}_classifier.pkl")
+        else:
+            output_path = os.path.join(os.path.dirname(__file__), "voice_quality_model.pkl")
 
     logger.info("Voice Quality Classifier Training")
 
@@ -262,7 +271,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Train voice quality classifier")
     parser.add_argument("--dataset-dir", required=True, help="Path to dataset directory with good/ and bad/ folders")
-    parser.add_argument("--output", default=None, help="Output path for trained model")
+    parser.add_argument("--voice-id", default=None, help="Voice ID for per-voice model (saved to ~/.rho_tts/models/)")
+    parser.add_argument("--output", default=None, help="Explicit output path for trained model")
     args = parser.parse_args()
 
-    train(args.dataset_dir, args.output)
+    train(args.dataset_dir, voice_id=args.voice_id, output_path=args.output)
