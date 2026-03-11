@@ -67,9 +67,9 @@ all = [
 rho-tts-ui = "rho_tts.ui:launch_ui"
 
 [project.urls]
-Homepage = "https://github.com/ryanmac/rho-tts"
-Repository = "https://github.com/ryanmac/rho-tts"
-Issues = "https://github.com/ryanmac/rho-tts/issues"
+Homepage = "https://github.com/rhofield/rho-tts"
+Repository = "https://github.com/rhofield/rho-tts"
+Issues = "https://github.com/rhofield/rho-tts/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/rho_tts"]
