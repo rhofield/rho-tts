@@ -504,6 +504,27 @@ class BaseTTS(ABC):
 
         return audio
 
+    # -- Audio save helpers ----------------------------------------------------
+
+    def _save_wav(self, path: str, audio: torch.Tensor, sample_rate: int) -> None:
+        """Save audio tensor as WAV, with stdlib fallback if torchaudio backend is unavailable.
+
+        torchaudio >= 2.6 defaults to the torchcodec backend; this fallback
+        uses Python's built-in wave module (no extra dependencies) so saves
+        still work in environments that don't have torchcodec installed.
+        """
+        try:
+            torchaudio.save(path, audio, sample_rate)
+        except Exception:
+            import wave
+            audio_np = audio.squeeze(0).cpu().numpy()
+            audio_int16 = (np.clip(audio_np, -1.0, 1.0) * 32767).astype(np.int16)
+            with wave.open(path, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(sample_rate)
+                wf.writeframes(audio_int16.tobytes())
+
     # -- Format conversion ----------------------------------------------------
 
     @staticmethod
@@ -625,7 +646,7 @@ class BaseTTS(ABC):
                         save_wav = audio.cpu() if audio.device.type != 'cpu' else audio
                         if save_wav.dim() == 1:
                             save_wav = save_wav.unsqueeze(0)
-                        torchaudio.save(temp_path, save_wav, self.sample_rate)
+                        self._save_wav(temp_path, save_wav, self.sample_rate)
 
                         drift_prob, is_voice_ok = self._validate_accent_drift(temp_path)
 
@@ -819,7 +840,7 @@ class BaseTTS(ABC):
                         else:
                             wav_path = item_path
 
-                        torchaudio.save(wav_path, final_wav, self.sample_rate)
+                        self._save_wav(wav_path, final_wav, self.sample_rate)
 
                         if format != "wav":
                             item_path = self._convert_format(wav_path, format)

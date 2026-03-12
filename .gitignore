@@ -45,3 +45,6 @@ dataset/
 # Misc
 *.log
 .env
+
+# Local scratch scripts (not part of library)
+scratch/
