@@ -99,6 +99,33 @@ class WorkerProcess:
 
         return decode_message(resp_line)
 
+    def send_nowait(self, msg_type: str, **payload) -> None:
+        """Send a message without waiting for a response.
+
+        Used for streaming where multiple responses arrive asynchronously.
+        """
+        if not self.alive:
+            raise RuntimeError("Worker is not running")
+
+        line = encode_message(msg_type, **payload)
+        self._proc.stdin.write(line)
+        self._proc.stdin.flush()
+
+    def receive(self) -> Optional[dict]:
+        """Read a single response from the worker.
+
+        Returns None if the worker has closed stdout.
+        """
+        if not self.alive:
+            return None
+        try:
+            resp_line = self._proc.stdout.readline()
+            if not resp_line:
+                return None
+            return decode_message(resp_line)
+        except Exception:
+            return None
+
     def send_cancel(self) -> None:
         """Non-blocking cancel — best-effort, does not wait for response."""
         try:

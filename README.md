@@ -68,12 +68,16 @@ tts = TTSFactory.get_tts_instance(
 )
 
 # Generate a single file
-tts.generate_single("Hello world!", "output.wav")
+result = tts.generate("Hello world!", "output.wav")
+
+# Generate without saving to disk (in-memory only)
+result = tts.generate("Hello world!")
+print(result.audio, result.duration_sec)
 
 # Generate a batch
-files = tts.generate(
+results = tts.generate(
     texts=["First sentence.", "Second sentence."],
-    output_base_path="batch_output",
+    output_path="batch_output",
 )
 ```
 
@@ -136,13 +140,7 @@ from rho_tts import BaseTTS, TTSFactory
 
 class MyTTS(BaseTTS):
     def _generate_audio(self, text, **kwargs):
-        # Your model inference here
-        ...
-
-    def generate(self, texts, output_base_path, cancellation_token=None):
-        ...
-
-    def generate_single(self, text, output_path, cancellation_token=None):
+        # Your model inference here — return a torch.Tensor
         ...
 
     @property
@@ -165,18 +163,59 @@ When validation deps are installed (`pip install rho-tts[validation]`), generate
 
 ### Training the Accent Drift Classifier
 
+Prepare a dataset with `good/` and `bad/` subdirectories containing `.wav` files, then train a classifier. Models can be trained globally or per-voice.
+
+#### Per-voice models (recommended)
+
+Each voice can have its own classifier, stored at `~/.rho_tts/models/{voice_id}_classifier.pkl`. This gives better accuracy since accent drift patterns differ between voices.
+
 ```bash
-# Prepare a dataset with good/ and bad/ subdirectories containing .wav files
+# CLI
+python -m rho_tts.validation.classifier.trainer \
+    --dataset-dir /path/to/dataset \
+    --voice-id my_voice
+```
+
+```python
+# Library
+from rho_tts.validation.classifier.trainer import train
+
+train(dataset_dir="/path/to/dataset", voice_id="my_voice")
+```
+
+During generation, set `voice_id` on the TTS instance to use the per-voice model automatically:
+
+```python
+tts = TTSFactory.get_tts_instance(provider="qwen", reference_audio="voice.wav", reference_text="...")
+tts.voice_id = "my_voice"
+tts.generate(texts, "output")  # uses ~/.rho_tts/models/my_voice_classifier.pkl
+```
+
+#### Global model
+
+A global model is used as a fallback when no per-voice model exists.
+
+```bash
+# Train a global model
 python -m rho_tts.validation.classifier.trainer --dataset-dir /path/to/dataset
 
-# Or specify output path
+# Or specify an explicit output path
 python -m rho_tts.validation.classifier.trainer \
     --dataset-dir /path/to/dataset \
     --output /path/to/voice_quality_model.pkl
 ```
 
-Set the model path via environment variable:
+#### Model lookup order
+
+When predicting accent drift, the classifier checks for models in this order:
+
+1. Per-voice model at `~/.rho_tts/models/{voice_id}_classifier.pkl`
+2. Explicit path passed via `model_path` parameter
+3. `RHO_TTS_CLASSIFIER_MODEL` environment variable
+4. Bundled global model
+
 ```bash
+# Override the global model path via environment variable
 export RHO_TTS_CLASSIFIER_MODEL=/path/to/voice_quality_model.pkl
 ```
 

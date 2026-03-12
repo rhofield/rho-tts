@@ -39,11 +39,17 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _get_wav_duration(path: str) -> Optional[float]:
-    """Return duration in seconds from a WAV file header, or None on error."""
+def _get_audio_duration(path: str) -> Optional[float]:
+    """Return duration in seconds from an audio file, or None on error."""
     try:
         with wave.open(path, "rb") as wf:
             return wf.getnframes() / wf.getframerate()
+    except Exception:
+        pass
+    try:
+        from pydub import AudioSegment
+        seg = AudioSegment.from_file(path)
+        return len(seg) / 1000.0
     except Exception:
         return None
 
@@ -53,17 +59,22 @@ def generate_audio(
     model_id: str,
     voice_id: str,
     text: str,
-) -> tuple[Optional[str], str]:
+    speed: float = 1.0,
+    pitch_semitones: float = 0.0,
+    format: str = "wav",
+):
     """
-    Run TTS generation for the given text.
+    Generator that runs TTS generation, yielding progress updates.
 
-    Returns:
-        (output_wav_path_or_None, status_message)
+    Yields:
+        (output_path_or_None, status_message)
     """
     if not model_id:
-        return None, "Please select a model."
+        yield None, "Please select a model."
+        return
     if not text.strip():
-        return None, "Please enter text to generate."
+        yield None, "Please enter text to generate."
+        return
 
     model_cfg = state.config.models.get(model_id)
     voice_cfg: Optional[VoiceProfile] = None
@@ -71,7 +82,8 @@ def generate_audio(
         voice_cfg = get_builtin_voice(voice_id) or state.config.voices.get(voice_id)
 
     if model_cfg is None:
-        return None, f"Model '{model_id}' not found in config."
+        yield None, f"Model '{model_id}' not found in config."
+        return
 
     # Validate: Qwen Base models need reference audio (voice cloning).
     if (
@@ -79,10 +91,11 @@ def generate_audio(
         and not _is_custom_voice_model(model_cfg)
         and (voice_cfg is None or voice_cfg.reference_audio is None)
     ):
-        return None, (
+        yield None, (
             "This Qwen Base model requires a voice with reference audio. "
             "Add a custom voice with reference audio, or switch to a CustomVoice model."
         )
+        return
 
     # Validate: Qwen CustomVoice models need a named speaker, not reference audio.
     if (
@@ -91,52 +104,111 @@ def generate_audio(
         and voice_cfg is not None
         and not voice_cfg.speaker
     ):
-        return None, (
+        yield None, (
             "This CustomVoice model requires a built-in speaker voice (e.g. Vivian, Ryan). "
             "Voice cloning with reference audio is only supported on Base models."
         )
+        return
 
     try:
         tts = state.get_or_create_tts(model_cfg, voice_cfg)
     except Exception as e:
-        return None, f"Failed to initialize TTS: {e}"
+        yield None, f"Failed to initialize TTS: {e}"
+        return
 
     token = state.new_cancellation_token()
 
     os.makedirs(state.config.output_dir, exist_ok=True)
     timestamp = int(time.time())
     voice_label = voice_id or "default"
-    output_path = os.path.join(state.config.output_dir, f"gen_{voice_label}_{timestamp}.wav")
+    output_path = os.path.join(
+        state.config.output_dir, f"gen_{voice_label}_{timestamp}.{format}",
+    )
 
-    try:
-        result = tts.generate(text, output_path, cancellation_token=token)
-        if result is None:
-            return None, "Generation failed — no audio produced. Check logs for details."
+    yield None, "Starting generation..."
 
-        # Record in library history
-        voice_name = ""
-        if voice_cfg:
-            voice_name = voice_cfg.name
-        record = GenerationRecord(
-            id=uuid.uuid4().hex[:12],
-            timestamp=time.time(),
-            audio_path=output_path,
-            text=text,
-            model_id=model_id,
-            model_name=model_cfg.name,
-            voice_id=voice_id or None,
-            voice_name=voice_name,
-            provider=model_cfg.provider,
-            duration_sec=_get_wav_duration(output_path),
-        )
-        state.add_generation_record(record)
+    # Background thread + queue pattern for progress streaming
+    q = queue.Queue()
 
-        return output_path, f"Generated: {os.path.basename(output_path)}"
-    except CancelledException:
-        return None, "Generation cancelled."
-    except Exception as e:
-        logger.exception("Generation error")
-        return None, f"Generation error: {e}"
+    def on_progress(msg: str):
+        q.put(("progress", msg))
+
+    def run():
+        try:
+            result = tts.generate(
+                text, output_path, cancellation_token=token,
+                speed=speed, pitch_semitones=pitch_semitones,
+                format=format, progress_callback=on_progress,
+            )
+            # generate() catches CancelledException internally and returns None,
+            # so check the token to distinguish cancellation from failure.
+            if result is None and token.is_cancelled():
+                q.put(("cancelled", None))
+            else:
+                q.put(("done", result))
+        except Exception as e:
+            logger.exception("Generation error")
+            q.put(("error", e))
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+
+    while True:
+        kind, data = q.get()
+        if kind == "progress":
+            yield None, data
+        elif kind == "done":
+            result = data
+            if result is None:
+                yield None, "Generation failed — no audio produced. Check logs for details."
+                return
+
+            result_path = result.path if hasattr(result, 'path') else result
+            if result_path is None:
+                yield None, "Generation failed — no audio saved. Check logs for details."
+                return
+
+            voice_name = voice_cfg.name if voice_cfg else ""
+
+            duration = None
+            if hasattr(result, 'duration_sec') and result.duration_sec > 0:
+                duration = result.duration_sec
+            else:
+                duration = _get_audio_duration(result_path)
+
+            record = GenerationRecord(
+                id=uuid.uuid4().hex[:12],
+                timestamp=time.time(),
+                audio_path=result_path,
+                text=text,
+                model_id=model_id,
+                model_name=model_cfg.name,
+                voice_id=voice_id or None,
+                voice_name=voice_name,
+                provider=model_cfg.provider,
+                duration_sec=duration,
+                format=format,
+            )
+            state.add_generation_record(record)
+
+            # Build status with validation scores
+            status = f"Generated: {os.path.basename(result_path)}"
+            score_parts = []
+            if hasattr(result, 'drift_prob') and result.drift_prob is not None:
+                score_parts.append(f"Drift: {result.drift_prob:.3f}")
+            if hasattr(result, 'text_similarity') and result.text_similarity is not None:
+                score_parts.append(f"Similarity: {result.text_similarity:.2f}")
+            if score_parts:
+                status += " | " + " | ".join(score_parts)
+
+            yield result_path, status
+            return
+        elif kind == "cancelled":
+            yield None, "Generation cancelled."
+            return
+        elif kind == "error":
+            yield None, f"Generation error: {data}"
+            return
 
 
 def cancel_generation(state: AppState) -> str:
@@ -331,6 +403,8 @@ def add_voice(
     display_name: str,
     audio_path: Optional[str],
     reference_text: str,
+    language: str = "English",
+    description: Optional[str] = None,
 ) -> tuple[list[list[str]], str]:
     """
     Add or update a voice profile.
@@ -357,6 +431,8 @@ def add_voice(
         name=display_name,
         reference_audio=managed_path,
         reference_text=reference_text.strip() if reference_text else None,
+        language=language,
+        description=description.strip() if description else None,
     )
     state.config.voices[voice_id] = profile
     state.save()
@@ -390,9 +466,55 @@ def delete_voice(state: AppState, voice_id: str) -> tuple[list[list[str]], str]:
 def _voices_table(config: AppConfig) -> list[list[str]]:
     """Build the voices table data for Gradio Dataframe."""
     return [
-        [v.id, v.name, v.reference_audio, v.reference_text or ""]
+        [v.id, v.name, v.reference_audio, v.reference_text or "", v.language, v.description or ""]
         for v in config.voices.values()
     ]
+
+
+def load_voice_for_edit(
+    state: AppState, voice_id: str,
+) -> tuple[str, str, str, str]:
+    """Load a saved voice's current values into the edit form.
+
+    Returns:
+        (name, language, description, reference_text)
+    """
+    if not voice_id or voice_id not in state.config.voices:
+        return "", "English", "", ""
+
+    v = state.config.voices[voice_id]
+    return v.name, v.language, v.description or "", v.reference_text or ""
+
+
+def edit_voice(
+    state: AppState,
+    voice_id: str,
+    new_name: Optional[str],
+    language: str,
+    description: Optional[str],
+    reference_text: Optional[str],
+) -> tuple[list[list[str]], str]:
+    """Update an existing voice profile.
+
+    Returns:
+        (updated_voices_table, status_message)
+    """
+    if not voice_id or voice_id not in state.config.voices:
+        return _voices_table(state.config), "Select a voice to edit."
+
+    v = state.config.voices[voice_id]
+
+    if new_name and new_name.strip():
+        v.name = new_name.strip()
+    if language:
+        v.language = language
+    v.description = description.strip() if description and description.strip() else None
+    v.reference_text = reference_text.strip() if reference_text and reference_text.strip() else None
+
+    state.save()
+    state.invalidate_tts()
+
+    return _voices_table(state.config), f"Voice '{v.name}' updated."
 
 
 # ---------------------------------------------------------------------------
@@ -718,6 +840,16 @@ def library_get_audio(
             path = r.audio_path if os.path.exists(r.audio_path) else None
             return path, r.text
     return None, ""
+
+
+def library_get_record(
+    state: AppState, record_id: str,
+) -> Optional[GenerationRecord]:
+    """Look up a full GenerationRecord by ID."""
+    for r in state.history:
+        if r.id == record_id:
+            return r
+    return None
 
 
 def library_delete_record(

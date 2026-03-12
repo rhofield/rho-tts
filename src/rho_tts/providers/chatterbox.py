@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Union
 import torch
 
 from ..base_tts import BaseTTS
+from ..provider_info import ProviderInfo, VoiceInfo
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +121,27 @@ class ChatterboxTTS(BaseTTS):
         gen_kwargs.update(kwargs)
 
         return self.model.generate(text, audio_prompt_path=audio_prompt_path, **gen_kwargs)
+
+    def close(self) -> None:
+        """Release model and free GPU memory."""
+        if self.model is not None:
+            del self.model
+            self.model = None
+        self._prompt_cache.clear()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    @classmethod
+    def provider_info(cls) -> ProviderInfo:
+        """Return Chatterbox provider metadata."""
+        return ProviderInfo(
+            name="chatterbox",
+            supports_voice_cloning=True,
+            supported_languages=["English"],
+            builtin_voices=[
+                VoiceInfo(id="default", name="Default", language="English"),
+            ],
+        )
 
     @property
     def sample_rate(self) -> int:

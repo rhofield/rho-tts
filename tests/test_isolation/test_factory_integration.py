@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from rho_tts.exceptions import ProviderNotFoundError
 from rho_tts.factory import TTSFactory
 from rho_tts.isolation.protocol import READY
 
@@ -69,5 +70,5 @@ class TestFactoryIsolation:
         TTSFactory._providers = {}
         TTSFactory._isolated_providers = set()
 
-        with pytest.raises(ValueError, match="Unknown TTS provider"):
+        with pytest.raises(ProviderNotFoundError, match="Unknown TTS provider"):
             TTSFactory.get_tts_instance(provider="totally_fake")

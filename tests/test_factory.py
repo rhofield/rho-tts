@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from rho_tts.base_tts import BaseTTS
+from rho_tts.exceptions import ProviderNotFoundError
 from rho_tts.factory import TTSFactory
 
 
@@ -58,7 +59,7 @@ class TestTTSFactory:
         assert isinstance(instance, MockTTS)
 
     def test_unknown_provider_raises(self):
-        with pytest.raises(ValueError, match="Unknown TTS provider"):
+        with pytest.raises(ProviderNotFoundError, match="Unknown TTS provider"):
             TTSFactory.get_tts_instance(provider="nonexistent_provider_xyz")
 
     def test_register_non_subclass_raises(self):

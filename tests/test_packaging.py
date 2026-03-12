@@ -79,7 +79,8 @@ class TestFactoryAsLibrary:
         assert tts.sample_rate == 16000
 
     def test_unknown_provider_message_is_helpful(self):
-        with pytest.raises(ValueError, match="pip install rho-tts"):
+        from rho_tts.exceptions import ProviderNotFoundError
+        with pytest.raises(ProviderNotFoundError, match="pip install rho-tts"):
             TTSFactory.get_tts_instance(provider="does_not_exist_xyz")
 
     def test_kwargs_forwarded_to_provider(self):
@@ -172,10 +173,13 @@ class TestBaseTTSGenerate:
     def tts(self):
         return GeneratingTTS()
 
-    def test_single_string_returns_path(self, tts, tmp_path):
+    def test_single_string_returns_generation_result(self, tts, tmp_path):
+        from rho_tts.result import GenerationResult
         out = str(tmp_path / "out.wav")
         result = tts.generate("Hello world", out)
-        assert result == out
+        assert isinstance(result, GenerationResult)
+        assert result.path == out
+        assert result.audio is not None
         assert os.path.exists(out)
 
     def test_single_string_none_on_failure(self, tts, tmp_path):
@@ -183,14 +187,16 @@ class TestBaseTTSGenerate:
         result = tts.generate("Hello", str(tmp_path / "out.wav"))
         assert result is None
 
-    def test_list_returns_list_of_paths(self, tts, tmp_path):
+    def test_list_returns_list_of_results(self, tts, tmp_path):
+        from rho_tts.result import GenerationResult
         out = str(tmp_path / "batch")
         result = tts.generate(["First text", "Second text"], out)
         assert isinstance(result, list)
         assert len(result) == 2
-        for path in result:
-            assert path is not None
-            assert os.path.exists(path)
+        for r in result:
+            assert r is not None
+            assert isinstance(r, GenerationResult)
+            assert os.path.exists(r.path)
 
     def test_phonetic_mapping_applied(self, tts, tmp_path):
         tts.phonetic_mapping = {"AI": "A.I."}

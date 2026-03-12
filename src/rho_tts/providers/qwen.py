@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Union
 import torch
 
 from ..base_tts import BaseTTS
+from ..provider_info import ProviderInfo, VoiceInfo
 
 logger = logging.getLogger(__name__)
 
@@ -219,6 +220,34 @@ class QwenTTS(BaseTTS):
         normalized = torch.tanh(normalized / max_amplitude) * max_amplitude
 
         return normalized.reshape(original_shape)
+
+    def close(self) -> None:
+        """Release model and free GPU memory."""
+        if self.qwen3_model is not None:
+            del self.qwen3_model
+            self.qwen3_model = None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    @classmethod
+    def provider_info(cls) -> ProviderInfo:
+        """Return Qwen provider metadata."""
+        return ProviderInfo(
+            name="qwen",
+            supports_voice_cloning=True,
+            supported_languages=["English", "Chinese", "Japanese", "Korean"],
+            builtin_voices=[
+                VoiceInfo(id="Chelsie", name="Chelsie", language="English"),
+                VoiceInfo(id="Aidan", name="Aidan", language="English"),
+                VoiceInfo(id="Vivian", name="Vivian", language="English"),
+                VoiceInfo(id="Ryan", name="Ryan", language="English"),
+                VoiceInfo(id="Aria", name="Aria", language="English"),
+                VoiceInfo(id="Ethan", name="Ethan", language="English"),
+                VoiceInfo(id="Luna", name="Luna", language="English"),
+                VoiceInfo(id="Harper", name="Harper", language="English"),
+                VoiceInfo(id="James", name="James", language="English"),
+            ],
+        )
 
     @property
     def sample_rate(self) -> int:

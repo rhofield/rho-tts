@@ -8,8 +8,10 @@ across threads during long-running TTS generation tasks.
 import threading
 from typing import Optional
 
+from .exceptions import RhoTTSError
 
-class CancelledException(Exception):
+
+class CancelledException(RhoTTSError):
     """Exception raised when a task is cancelled."""
     pass
 

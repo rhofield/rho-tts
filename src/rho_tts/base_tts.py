@@ -4,6 +4,7 @@ Abstract base class for TTS implementations.
 Provides shared functionality for audio processing, validation, and text handling
 that can be reused across different TTS providers.
 """
+import asyncio
 import logging
 import os
 import random
@@ -11,15 +12,21 @@ import tempfile
 import time
 import traceback
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, Union, overload
+from typing import Callable, Dict, Generator, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
 import torchaudio
 
 from .cancellation import CancellationToken, CancelledException
+from .exceptions import AudioGenerationError, FormatConversionError
+from .provider_info import ProviderInfo
+from .result import GenerationResult
 
 logger = logging.getLogger(__name__)
+
+# Supported output formats
+_SUPPORTED_FORMATS = {"wav", "mp3", "flac", "ogg"}
 
 # Default phonetic mapping - users can override via constructor
 DEFAULT_PHONETIC_MAPPING: Dict[str, str] = {}
@@ -73,6 +80,31 @@ class BaseTTS(ABC):
         # Voice encoder for speaker similarity validation (lazy loaded)
         self._voice_encoder = None
         self.reference_embedding = None
+
+    # -- Context manager protocol ----------------------------------------------
+
+    def close(self) -> None:
+        """Release resources (model, GPU memory). Override in subclasses."""
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
+    # -- Provider introspection ------------------------------------------------
+
+    @classmethod
+    def provider_info(cls) -> ProviderInfo:
+        """Return metadata about this provider.
+
+        Override in subclasses to provide accurate capabilities.
+        """
+        return ProviderInfo(name=cls.__name__)
+
+    # -- Lazy-loaded helpers ---------------------------------------------------
 
     @property
     def voice_encoder(self):
@@ -436,232 +468,491 @@ class BaseTTS(ABC):
         """
         return audio
 
-    @overload
-    def generate(self, texts: str, output_path: str,
-                 cancellation_token: Optional[CancellationToken] = None) -> Optional[str]: ...
+    # -- Speed / pitch post-processing ----------------------------------------
 
-    @overload
-    def generate(self, texts: List[str], output_path: str,
-                 cancellation_token: Optional[CancellationToken] = None) -> Optional[List[str]]: ...
+    def _apply_speed_pitch(
+        self, audio: torch.Tensor, speed: float, pitch_semitones: float,
+    ) -> torch.Tensor:
+        """Apply speed and/or pitch adjustments to audio.
 
-    def generate(self, texts: Union[str, List[str]], output_path: str,
-                 cancellation_token: Optional[CancellationToken] = None) -> Union[Optional[str], Optional[List[str]]]:
+        Args:
+            audio: Audio tensor
+            speed: Playback speed multiplier (1.0 = unchanged)
+            pitch_semitones: Pitch shift in semitones (0.0 = unchanged)
+
+        Returns:
+            Adjusted audio tensor
+        """
+        if speed != 1.0:
+            audio = torchaudio.functional.resample(
+                audio.unsqueeze(0) if audio.dim() == 1 else audio,
+                int(self.sample_rate * speed),
+                self.sample_rate,
+            )
+            if audio.dim() == 2 and audio.shape[0] == 1:
+                audio = audio.squeeze(0)
+
+        if pitch_semitones != 0.0:
+            needs_unsqueeze = audio.dim() == 1
+            if needs_unsqueeze:
+                audio = audio.unsqueeze(0)
+            audio = torchaudio.functional.pitch_shift(
+                audio, self.sample_rate, pitch_semitones,
+            )
+            if needs_unsqueeze:
+                audio = audio.squeeze(0)
+
+        return audio
+
+    # -- Format conversion ----------------------------------------------------
+
+    @staticmethod
+    def _convert_format(wav_path: str, target_format: str) -> str:
+        """Convert a WAV file to another format using pydub.
+
+        Args:
+            wav_path: Path to the WAV file
+            target_format: Target format (mp3, flac, ogg)
+
+        Returns:
+            Path to the converted file (original WAV is removed)
+
+        Raises:
+            FormatConversionError: If conversion fails
+        """
+        try:
+            from pydub import AudioSegment
+        except ImportError:
+            raise FormatConversionError(
+                "pydub is required for format conversion. "
+                "Install with: pip install pydub"
+            )
+
+        try:
+            seg = AudioSegment.from_wav(wav_path)
+            converted_path = wav_path.rsplit('.', 1)[0] + f".{target_format}"
+            seg.export(converted_path, format=target_format)
+            os.remove(wav_path)
+            return converted_path
+        except Exception as e:
+            raise FormatConversionError(f"Failed to convert to {target_format}: {e}")
+
+    # -- Pipeline extraction ---------------------------------------------------
+
+    def _run_pipeline(
+        self,
+        texts: list[str],
+        cancellation_token: CancellationToken,
+        progress_callback: Optional[Callable[[str], None]] = None,
+    ) -> list[Optional[Tuple[torch.Tensor, int, dict]]]:
+        """Core generation pipeline: phonetic mapping, segmentation, generation,
+        validation, and segment joining.
+
+        Returns:
+            List of (audio_tensor, segment_count) per text item, or None for failures.
+        """
+        token = cancellation_token
+        mapped_texts = [self._apply_phonetic_mapping(text) for text in texts]
+        results: list[Optional[Tuple[torch.Tensor, int]]] = []
+
+        logger.info(f"Generating audio for {len(mapped_texts)} text item(s)...")
+
+        for idx, text in enumerate(mapped_texts):
+            if token.is_cancelled():
+                raise CancelledException(f"Cancelled during text item {idx}")
+
+            segments = self._split_text_into_segments(text, self.max_chars_per_segment)
+            logger.info(f"Text item {idx + 1}: {len(text)} chars -> {len(segments)} segment(s)")
+
+            audio_segments = []
+            item_drift_scores = []
+            item_text_sim_scores = []
+            for seg_idx, segment in enumerate(segments):
+                if token.is_cancelled():
+                    raise CancelledException(
+                        f"Cancelled during segment {seg_idx + 1} of item {idx + 1}"
+                    )
+
+                logger.info(f"  Segment {seg_idx + 1}/{len(segments)} ({len(segment)} chars)")
+                if progress_callback:
+                    progress_callback(f"Generating segment {seg_idx + 1}/{len(segments)}...")
+
+                # --- Retry/validation loop ---
+                self._set_seeds()
+                best_audio = None
+                best_drift = float('inf')
+                best_text_sim = None
+                last_audio = None
+
+                for iteration in range(self.max_iterations):
+                    if token.is_cancelled():
+                        raise CancelledException(
+                            f"Cancelled during iteration {iteration} of "
+                            f"segment {seg_idx + 1}, item {idx + 1}"
+                        )
+
+                    if iteration > 0:
+                        self.seed = int(time.time() * 1000) % 100000
+                        self._set_seeds()
+
+                    logger.info(f"    Iteration {iteration + 1}: seed {self.seed}")
+
+                    try:
+                        raw = self._generate_audio(segment)
+                        audio = self._post_process_audio(raw)
+                        last_audio = audio
+                    except ValueError:
+                        raise  # config error — don't retry
+                    except RuntimeError as e:
+                        if "out of memory" in str(e).lower() or "length" in str(e).lower():
+                            logger.error(f"    Segment {seg_idx + 1} OOM: {e}")
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                            continue
+                        raise
+                    except Exception as e:
+                        logger.warning(f"    Segment {seg_idx + 1}: generation error ({e})")
+                        continue
+
+                    # Skip validation when max_iterations == 1
+                    if self.max_iterations == 1:
+                        best_audio = audio
+                        break
+
+                    fd, temp_path = tempfile.mkstemp(suffix=".wav", prefix="rho_tts_validate_")
+                    os.close(fd)
+                    try:
+                        save_wav = audio.cpu() if audio.device.type != 'cpu' else audio
+                        if save_wav.dim() == 1:
+                            save_wav = save_wav.unsqueeze(0)
+                        torchaudio.save(temp_path, save_wav, self.sample_rate)
+
+                        drift_prob, is_voice_ok = self._validate_accent_drift(temp_path)
+
+                        if drift_prob < best_drift:
+                            best_drift = drift_prob
+                            best_audio = audio.clone()
+                            logger.info(f"      New best: drift {best_drift:.3f}")
+
+                        is_text_ok = True
+                        text_sim = 1.0
+
+                        if is_voice_ok:
+                            is_text_ok, text_sim, transcribed = self._validate_text_match(
+                                temp_path, segment
+                            )
+                            best_text_sim = text_sim
+                            logger.info(
+                                f"      Text similarity: {text_sim:.3f} "
+                                f"(threshold: {self.text_similarity_threshold})"
+                            )
+
+                        if is_voice_ok and is_text_ok:
+                            logger.info(
+                                f"    Segment {seg_idx + 1} valid after "
+                                f"{iteration + 1} iteration(s)"
+                            )
+                            best_audio = audio
+                            break
+
+                        reasons = []
+                        if not is_voice_ok:
+                            reasons.append(f"drift={drift_prob:.3f}")
+                        if not is_text_ok:
+                            reasons.append(f"text={text_sim:.3f}")
+                        logger.warning(
+                            f"    Segment {seg_idx + 1} invalid: "
+                            f"{', '.join(reasons)}, retrying "
+                            f"({iteration + 1}/{self.max_iterations})"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"    Segment {seg_idx + 1}: validation error ({e})"
+                        )
+                    finally:
+                        if os.path.exists(temp_path):
+                            try:
+                                os.remove(temp_path)
+                            except OSError:
+                                pass
+
+                    del audio
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                else:  # for/else: runs when the loop exhausts without a break
+                    if best_audio is not None:
+                        logger.warning(
+                            f"    Segment {seg_idx + 1}: max iterations reached, "
+                            f"returning best (drift={best_drift:.3f})"
+                        )
+                    elif last_audio is not None:
+                        best_audio = last_audio
+                        logger.warning(
+                            f"    Segment {seg_idx + 1}: max iterations reached, "
+                            f"returning last audio"
+                        )
+
+                if best_audio is not None:
+                    audio_segments.append(best_audio)
+                    if best_drift != float('inf'):
+                        item_drift_scores.append(best_drift)
+                    if best_text_sim is not None:
+                        item_text_sim_scores.append(best_text_sim)
+                else:
+                    logger.error(f"  Segment {seg_idx + 1} failed to generate")
+
+            if not audio_segments:
+                logger.error(f"Item {idx + 1} failed: no segments generated")
+                results.append(None)
+                continue
+
+            final_audio = self._smooth_segment_join(audio_segments)
+
+            if final_audio is None:
+                logger.error(f"Item {idx + 1} failed: segment join returned None")
+                results.append(None)
+                continue
+
+            metadata = {}
+            if item_drift_scores:
+                metadata["drift_prob"] = max(item_drift_scores)
+            if item_text_sim_scores:
+                metadata["text_similarity"] = min(item_text_sim_scores)
+            results.append((final_audio, len(audio_segments), metadata))
+
+        return results
+
+    # -- Unified generate() ----------------------------------------------------
+
+    def generate(
+        self,
+        texts: Union[str, List[str]],
+        output_path: Optional[str] = None,
+        cancellation_token: Optional[CancellationToken] = None,
+        format: str = "wav",
+        speed: float = 1.0,
+        pitch_semitones: float = 0.0,
+        progress_callback: Optional[Callable[[str], None]] = None,
+    ) -> Union[Optional[GenerationResult], Optional[List[Optional[GenerationResult]]]]:
         """
         Generate audio from text.
 
         Accepts a single string or a list of strings. Applies phonetic mapping,
         splits long texts into segments, generates and validates each segment,
-        joins segments with crossfading, and saves to disk.
+        joins segments with crossfading.
+
+        When ``output_path`` is provided, audio is saved to disk.
+        When omitted, audio is returned in-memory only.
 
         Args:
             texts: Text to synthesize — a single string or a list of strings.
             output_path: When *texts* is a single string, the exact file path
                 to write (e.g. ``"out.wav"``). When *texts* is a list, a base
                 path — individual files are saved as ``"{output_path}_{idx}.wav"``.
+                When ``None``, returns in-memory audio only.
             cancellation_token: Optional token for cooperative cancellation.
+            format: Output audio format ("wav", "mp3", "flac", "ogg").
+            speed: Playback speed multiplier (1.0 = unchanged).
+            pitch_semitones: Pitch shift in semitones (0.0 = unchanged).
 
         Returns:
-            * Single string mode: the output file path, or ``None`` on failure.
-            * List mode: a list of output file paths (``None`` for failed items),
+            * Single string mode: ``GenerationResult``, or ``None`` on failure.
+            * List mode: list of ``GenerationResult`` (``None`` for failed items),
               or ``None`` if all items failed.
         """
+        if format not in _SUPPORTED_FORMATS:
+            raise FormatConversionError(
+                f"Unsupported format '{format}'. Supported: {', '.join(sorted(_SUPPORTED_FORMATS))}"
+            )
+
         _single_mode = isinstance(texts, str)
         if _single_mode:
             texts = [texts]
 
         try:
             token = cancellation_token or CancellationToken()
-            mapped_texts = [self._apply_phonetic_mapping(text) for text in texts]
-            output_files = []
 
-            logger.info(f"Generating audio for {len(mapped_texts)} text item(s)...")
+            pipeline_results = self._run_pipeline(texts, token, progress_callback)
 
-            for idx, text in enumerate(mapped_texts):
-                if token.is_cancelled():
-                    raise CancelledException(f"Cancelled during text item {idx}")
+            output_results: list[Optional[GenerationResult]] = []
 
-                segments = self._split_text_into_segments(text, self.max_chars_per_segment)
-                logger.info(f"Text item {idx + 1}: {len(text)} chars -> {len(segments)} segment(s)")
+            for idx, pipeline_item in enumerate(pipeline_results):
+                if pipeline_item is None:
+                    output_results.append(None)
+                    continue
 
-                audio_segments = []
-                for seg_idx, segment in enumerate(segments):
-                    if token.is_cancelled():
-                        raise CancelledException(
-                            f"Cancelled during segment {seg_idx + 1} of item {idx + 1}"
-                        )
+                final_audio, segments_count, metadata = pipeline_item
 
-                    logger.info(f"  Segment {seg_idx + 1}/{len(segments)} ({len(segment)} chars)")
+                # Apply speed/pitch
+                if speed != 1.0 or pitch_semitones != 0.0:
+                    final_audio = self._apply_speed_pitch(final_audio, speed, pitch_semitones)
 
-                    # --- Retry/validation loop ---
-                    self._set_seeds()
-                    best_audio = None
-                    best_drift = float('inf')
-                    last_audio = None
+                # Compute duration
+                audio_for_duration = final_audio
+                if audio_for_duration.dim() == 2:
+                    num_samples = audio_for_duration.shape[-1]
+                else:
+                    num_samples = audio_for_duration.numel()
+                duration_sec = num_samples / self.sample_rate
 
-                    for iteration in range(self.max_iterations):
-                        if token.is_cancelled():
-                            raise CancelledException(
-                                f"Cancelled during iteration {iteration} of "
-                                f"segment {seg_idx + 1}, item {idx + 1}"
-                            )
+                result = GenerationResult(
+                    audio=final_audio,
+                    sample_rate=self.sample_rate,
+                    duration_sec=duration_sec,
+                    segments_count=segments_count,
+                    format=format,
+                    drift_prob=metadata.get("drift_prob"),
+                    text_similarity=metadata.get("text_similarity"),
+                )
 
-                        if iteration > 0:
-                            self.seed = int(time.time() * 1000) % 100000
-                            self._set_seeds()
+                # Save to disk if output_path provided
+                if output_path is not None:
+                    try:
+                        item_path = output_path if _single_mode else f"{output_path}_{idx}.wav"
+                        final_wav = final_audio.cpu() if final_audio.device.type != 'cpu' else final_audio
+                        if final_wav.dim() == 1:
+                            final_wav = final_wav.unsqueeze(0)
 
-                        logger.info(f"    Iteration {iteration + 1}: seed {self.seed}")
+                        # Always save as WAV first
+                        if format != "wav":
+                            wav_path = item_path.rsplit('.', 1)[0] + ".wav" if '.' in item_path else item_path + ".wav"
+                        else:
+                            wav_path = item_path
 
-                        try:
-                            raw = self._generate_audio(segment)
-                            audio = self._post_process_audio(raw)
-                            last_audio = audio
-                        except ValueError:
-                            raise  # config error — don't retry
-                        except RuntimeError as e:
-                            if "out of memory" in str(e).lower() or "length" in str(e).lower():
-                                logger.error(f"    Segment {seg_idx + 1} OOM: {e}")
-                                if torch.cuda.is_available():
-                                    torch.cuda.empty_cache()
-                                continue
-                            raise
-                        except Exception as e:
-                            logger.warning(f"    Segment {seg_idx + 1}: generation error ({e})")
-                            continue
+                        torchaudio.save(wav_path, final_wav, self.sample_rate)
 
-                        # Skip validation when max_iterations == 1
-                        if self.max_iterations == 1:
-                            best_audio = audio
-                            break
+                        if format != "wav":
+                            item_path = self._convert_format(wav_path, format)
 
-                        fd, temp_path = tempfile.mkstemp(suffix=".wav", prefix="rho_tts_validate_")
-                        os.close(fd)
-                        try:
-                            save_wav = audio.cpu() if audio.device.type != 'cpu' else audio
-                            if save_wav.dim() == 1:
-                                save_wav = save_wav.unsqueeze(0)
-                            torchaudio.save(temp_path, save_wav, self.sample_rate)
+                        result.path = item_path
+                        logger.info(f"Item {idx + 1} saved: {item_path}")
 
-                            drift_prob, is_voice_ok = self._validate_accent_drift(temp_path)
-
-                            if drift_prob < best_drift:
-                                best_drift = drift_prob
-                                best_audio = audio.clone()
-                                logger.info(f"      New best: drift {best_drift:.3f}")
-
-                            is_text_ok = True
-                            text_sim = 1.0
-
-                            if is_voice_ok:
-                                is_text_ok, text_sim, transcribed = self._validate_text_match(
-                                    temp_path, segment
-                                )
-                                logger.info(
-                                    f"      Text similarity: {text_sim:.3f} "
-                                    f"(threshold: {self.text_similarity_threshold})"
-                                )
-
-                            if is_voice_ok and is_text_ok:
-                                logger.info(
-                                    f"    Segment {seg_idx + 1} valid after "
-                                    f"{iteration + 1} iteration(s)"
-                                )
-                                best_audio = audio
-                                break
-
-                            reasons = []
-                            if not is_voice_ok:
-                                reasons.append(f"drift={drift_prob:.3f}")
-                            if not is_text_ok:
-                                reasons.append(f"text={text_sim:.3f}")
-                            logger.warning(
-                                f"    Segment {seg_idx + 1} invalid: "
-                                f"{', '.join(reasons)}, retrying "
-                                f"({iteration + 1}/{self.max_iterations})"
-                            )
-                        except Exception as e:
-                            logger.warning(
-                                f"    Segment {seg_idx + 1}: validation error ({e})"
-                            )
-                        finally:
-                            if os.path.exists(temp_path):
-                                try:
-                                    os.remove(temp_path)
-                                except OSError:
-                                    pass
-
-                        del audio
+                        del final_wav
                         if torch.cuda.is_available():
                             torch.cuda.empty_cache()
-                    else:  # for/else: runs when the loop exhausts without a break
-                        if best_audio is not None:
-                            logger.warning(
-                                f"    Segment {seg_idx + 1}: max iterations reached, "
-                                f"returning best (drift={best_drift:.3f})"
-                            )
-                        elif last_audio is not None:
-                            best_audio = last_audio
-                            logger.warning(
-                                f"    Segment {seg_idx + 1}: max iterations reached, "
-                                f"returning last audio"
-                            )
 
-                    if best_audio is not None:
-                        audio_segments.append(best_audio)
-                    else:
-                        logger.error(f"  Segment {seg_idx + 1} failed to generate")
+                    except FormatConversionError:
+                        raise
+                    except Exception as e:
+                        logger.error(f"Failed to save audio for item {idx}: {e}")
+                        # Still return the result with audio but no path
+                        result.path = None
 
-                if not audio_segments:
-                    logger.error(f"Item {idx + 1} failed: no segments generated")
-                    output_files.append(None)
-                    continue
+                output_results.append(result)
 
-                final_audio = self._smooth_segment_join(audio_segments)
-
-                if final_audio is None:
-                    logger.error(f"Item {idx + 1} failed: segment join returned None")
-                    output_files.append(None)
-                    continue
-
-                try:
-                    item_path = output_path if _single_mode else f"{output_path}_{idx}.wav"
-                    final_wav = final_audio.cpu() if final_audio.device.type != 'cpu' else final_audio
-                    if final_wav.dim() == 1:
-                        final_wav = final_wav.unsqueeze(0)
-                    torchaudio.save(item_path, final_wav, self.sample_rate)
-                    output_files.append(item_path)
-                    logger.info(f"Item {idx + 1} saved: {item_path}")
-
-                    del final_wav, final_audio
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-
-                except Exception as e:
-                    logger.error(f"Failed to save audio for item {idx}: {e}")
-                    output_files.append(None)
-
-            successful = sum(1 for f in output_files if f is not None)
-            failed = len(output_files) - successful
+            successful = sum(1 for r in output_results if r is not None)
+            failed = len(output_results) - successful
 
             if failed > 0:
-                logger.warning(f"{failed}/{len(output_files)} text item(s) failed to generate")
+                logger.warning(f"{failed}/{len(output_results)} text item(s) failed to generate")
 
             if successful == 0:
                 logger.error("All text items failed to generate")
                 return None
 
-            logger.info(f"Successfully generated {successful}/{len(output_files)} audio file(s)")
+            logger.info(f"Successfully generated {successful}/{len(output_results)} audio file(s)")
 
             if _single_mode:
-                return output_files[0]
-            return output_files
+                return output_results[0]
+            return output_results
 
         except CancelledException as e:
             logger.warning(f"Generation cancelled: {e}")
             return None
+        except (FormatConversionError, ValueError):
+            raise
         except Exception as e:
             logger.error(f"Error in TTS generation: {e}")
             traceback.print_exc()
             return None
+
+    # -- Async API -------------------------------------------------------------
+
+    async def async_generate(
+        self,
+        texts: Union[str, List[str]],
+        output_path: Optional[str] = None,
+        cancellation_token: Optional[CancellationToken] = None,
+        format: str = "wav",
+        speed: float = 1.0,
+        pitch_semitones: float = 0.0,
+        progress_callback: Optional[Callable[[str], None]] = None,
+    ) -> Union[Optional[GenerationResult], Optional[List[Optional[GenerationResult]]]]:
+        """Async wrapper around generate(). Runs inference in a thread executor."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: self.generate(
+                texts,
+                output_path=output_path,
+                cancellation_token=cancellation_token,
+                format=format,
+                speed=speed,
+                pitch_semitones=pitch_semitones,
+                progress_callback=progress_callback,
+            ),
+        )
+
+    # -- Streaming API ---------------------------------------------------------
+
+    def stream(
+        self,
+        text: str,
+        cancellation_token: Optional[CancellationToken] = None,
+        speed: float = 1.0,
+        pitch_semitones: float = 0.0,
+    ) -> Generator[GenerationResult, None, None]:
+        """Yield one GenerationResult per text segment as generated.
+
+        Unlike generate(), this does not crossfade between segments —
+        each segment is returned independently as soon as it's ready.
+
+        Args:
+            text: Text to synthesize (single string only).
+            cancellation_token: Optional token for cooperative cancellation.
+            speed: Playback speed multiplier.
+            pitch_semitones: Pitch shift in semitones.
+
+        Yields:
+            GenerationResult with audio tensor for each segment.
+        """
+        token = cancellation_token or CancellationToken()
+        mapped_text = self._apply_phonetic_mapping(text)
+        segments = self._split_text_into_segments(mapped_text, self.max_chars_per_segment)
+
+        for seg_idx, segment in enumerate(segments):
+            if token.is_cancelled():
+                return
+
+            self._set_seeds()
+            try:
+                raw = self._generate_audio(segment)
+                audio = self._post_process_audio(raw)
+            except Exception as e:
+                logger.warning(f"Segment {seg_idx + 1} failed: {e}")
+                continue
+
+            # Trim and clean up
+            audio = self._trim_silence(audio, from_start=True, from_end=True)
+            audio = self._remove_dc_offset(audio)
+            audio = self._apply_fades(audio, fade_in=True, fade_out=True)
+
+            # Apply speed/pitch
+            if speed != 1.0 or pitch_semitones != 0.0:
+                audio = self._apply_speed_pitch(audio, speed, pitch_semitones)
+
+            if audio.dim() == 2:
+                num_samples = audio.shape[-1]
+            else:
+                num_samples = audio.numel()
+
+            yield GenerationResult(
+                audio=audio,
+                sample_rate=self.sample_rate,
+                duration_sec=num_samples / self.sample_rate,
+                segments_count=1,
+                format="wav",
+            )
 
     @property
     @abstractmethod

@@ -228,6 +228,7 @@ class GenerationRecord:
     voice_name: str
     provider: str
     duration_sec: Optional[float] = None
+    format: str = "wav"
 
     def to_dict(self) -> dict:
         return {
@@ -241,6 +242,7 @@ class GenerationRecord:
             "voice_name": self.voice_name,
             "provider": self.provider,
             "duration_sec": self.duration_sec,
+            "format": self.format,
         }
 
     @classmethod
@@ -256,6 +258,7 @@ class GenerationRecord:
             voice_name=data.get("voice_name", ""),
             provider=data["provider"],
             duration_sec=data.get("duration_sec"),
+            format=data.get("format", "wav"),
         )
 
 

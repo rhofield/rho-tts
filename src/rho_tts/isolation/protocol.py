@@ -11,6 +11,7 @@ from typing import Any
 # Request types (main -> worker)
 INIT = "init"
 GENERATE = "generate"
+STREAM = "stream"
 CANCEL = "cancel"
 SHUTDOWN = "shutdown"
 PING = "ping"
@@ -18,6 +19,7 @@ PING = "ping"
 # Response types (worker -> main)
 READY = "ready"
 RESULT = "result"
+SEGMENT_RESULT = "segment_result"
 ERROR = "error"
 CANCELLED = "cancelled"
 PONG = "pong"

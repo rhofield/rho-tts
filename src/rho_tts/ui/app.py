@@ -86,6 +86,11 @@ def _build_app(state: AppState) -> gr.Blocks:
                         state.config, _initial_model_id, _initial_voice_choices,
                     )
                     status_box = gr.Textbox(label="Status", interactive=False, value=_initial_status)
+                    format_dd = gr.Dropdown(
+                        choices=["wav", "mp3", "flac", "ogg"],
+                        value="wav",
+                        label="Output Format",
+                    )
                     audio_out = gr.Audio(label="Generated Audio", type="filepath")
 
             # -- Phonetic mapping accordion --
@@ -121,6 +126,13 @@ def _build_app(state: AppState) -> gr.Blocks:
                     )
                     params_cfg_weight = gr.Slider(
                         label="cfg_weight", minimum=0.1, maximum=1.0, step=0.05, value=0.6, visible=False,
+                    )
+                with gr.Row():
+                    params_speed = gr.Slider(
+                        label="Speed", minimum=0.5, maximum=2.0, step=0.05, value=1.0,
+                    )
+                    params_pitch = gr.Slider(
+                        label="Pitch (semitones)", minimum=-12, maximum=12, step=0.5, value=0.0,
                     )
                 with gr.Row():
                     save_params_btn = gr.Button("Save Parameters")
@@ -204,13 +216,15 @@ def _build_app(state: AppState) -> gr.Blocks:
                 outputs=[params_status],
             )
 
-            def _generate(model_id, voice_id, text):
-                path, msg = callbacks.generate_audio(state, model_id, voice_id, text)
-                return path, msg
+            def _generate(model_id, voice_id, text, speed, pitch, fmt):
+                yield from callbacks.generate_audio(
+                    state, model_id, voice_id, text,
+                    speed=speed, pitch_semitones=pitch, format=fmt,
+                )
 
             gen_btn.click(
                 fn=_generate,
-                inputs=[model_dd, voice_dd, text_input],
+                inputs=[model_dd, voice_dd, text_input, params_speed, params_pitch, format_dd],
                 outputs=[audio_out, status_box],
                 concurrency_limit=1,
             )
@@ -242,16 +256,44 @@ def _build_app(state: AppState) -> gr.Blocks:
                 placeholder="Transcript of the reference audio (required for Qwen)",
                 lines=2,
             )
+            v_language = gr.Dropdown(
+                choices=["English", "Chinese", "Japanese", "Korean"],
+                value="English",
+                label="Language",
+            )
+            v_description = gr.Textbox(
+                label="Description",
+                placeholder="Optional description",
+                lines=1,
+            )
             v_add_btn = gr.Button("Add / Update Voice", variant="primary")
             v_status = gr.Textbox(label="Status", interactive=False)
 
             gr.Markdown("### Saved Voices")
             v_table = gr.Dataframe(
                 value=callbacks._voices_table(state.config),
-                headers=["ID", "Name", "Audio Path", "Reference Text"],
+                headers=["ID", "Name", "Audio Path", "Reference Text", "Language", "Description"],
                 interactive=False,
                 label="Voice Profiles",
             )
+            with gr.Accordion("Edit Voice", open=False):
+                v_edit_dd = gr.Dropdown(
+                    choices=callbacks.user_voice_choices(state.config),
+                    label="Voice to Edit",
+                    interactive=True,
+                )
+                v_edit_name = gr.Textbox(label="Name", interactive=True)
+                v_edit_language = gr.Dropdown(
+                    choices=["English", "Chinese", "Japanese", "Korean"],
+                    value="English",
+                    label="Language",
+                    interactive=True,
+                )
+                v_edit_description = gr.Textbox(label="Description", interactive=True)
+                v_edit_ref_text = gr.Textbox(label="Reference Text", lines=2, interactive=True)
+                v_edit_btn = gr.Button("Save Changes", variant="primary")
+                v_edit_status = gr.Textbox(label="Status", interactive=False)
+
             with gr.Row():
                 v_del_dd = gr.Dropdown(
                     choices=callbacks.user_voice_choices(state.config),
@@ -263,19 +305,24 @@ def _build_app(state: AppState) -> gr.Blocks:
 
             # -- Voice events --
 
-            def _add_voice(vname, vaudio, vref, current_model_id):
-                table, msg = callbacks.add_voice(state, vname, vaudio, vref)
+            def _add_voice(vname, vaudio, vref, vlang, vdesc, current_model_id):
+                table, msg = callbacks.add_voice(
+                    state, vname, vaudio, vref, language=vlang, description=vdesc,
+                )
                 new_voice_dd = _voice_choices(current_model_id)
                 status = callbacks.status_for_model_voice(
                     state.config, current_model_id, new_voice_dd.choices,
                 )
-                del_choices = callbacks.user_voice_choices(state.config)
-                return table, msg, new_voice_dd, _model_choices(), status, gr.Dropdown(choices=del_choices)
+                uchoices = callbacks.user_voice_choices(state.config)
+                return (
+                    table, msg, new_voice_dd, _model_choices(), status,
+                    gr.Dropdown(choices=uchoices), gr.Dropdown(choices=uchoices),
+                )
 
             v_add_btn.click(
                 fn=_add_voice,
-                inputs=[v_name, v_audio, v_ref_text, model_dd],
-                outputs=[v_table, v_status, voice_dd, model_dd, status_box, v_del_dd],
+                inputs=[v_name, v_audio, v_ref_text, v_language, v_description, model_dd],
+                outputs=[v_table, v_status, voice_dd, model_dd, status_box, v_del_dd, v_edit_dd],
             )
 
             def _del_voice(vid, current_model_id):
@@ -284,13 +331,46 @@ def _build_app(state: AppState) -> gr.Blocks:
                 status = callbacks.status_for_model_voice(
                     state.config, current_model_id, new_voice_dd.choices,
                 )
-                del_choices = callbacks.user_voice_choices(state.config)
-                return table, msg, new_voice_dd, _model_choices(), status, gr.Dropdown(choices=del_choices)
+                uchoices = callbacks.user_voice_choices(state.config)
+                return (
+                    table, msg, new_voice_dd, _model_choices(), status,
+                    gr.Dropdown(choices=uchoices), gr.Dropdown(choices=uchoices),
+                )
 
             v_del_btn.click(
                 fn=_del_voice,
                 inputs=[v_del_dd, model_dd],
-                outputs=[v_table, v_status, voice_dd, model_dd, status_box, v_del_dd],
+                outputs=[v_table, v_status, voice_dd, model_dd, status_box, v_del_dd, v_edit_dd],
+            )
+
+            def _on_edit_voice_select(voice_id):
+                return callbacks.load_voice_for_edit(state, voice_id)
+
+            v_edit_dd.change(
+                fn=_on_edit_voice_select,
+                inputs=[v_edit_dd],
+                outputs=[v_edit_name, v_edit_language, v_edit_description, v_edit_ref_text],
+            )
+
+            def _edit_voice(vid, vname, vlang, vdesc, vref, current_model_id):
+                table, msg = callbacks.edit_voice(
+                    state, vid, vname, vlang, vdesc, vref,
+                )
+                new_voice_dd = _voice_choices(current_model_id)
+                status = callbacks.status_for_model_voice(
+                    state.config, current_model_id, new_voice_dd.choices,
+                )
+                uchoices = callbacks.user_voice_choices(state.config)
+                return (
+                    table, msg, new_voice_dd, _model_choices(), status,
+                    gr.Dropdown(choices=uchoices, value=vid),
+                    gr.Dropdown(choices=uchoices),
+                )
+
+            v_edit_btn.click(
+                fn=_edit_voice,
+                inputs=[v_edit_dd, v_edit_name, v_edit_language, v_edit_description, v_edit_ref_text, model_dd],
+                outputs=[v_table, v_edit_status, voice_dd, model_dd, status_box, v_edit_dd, v_del_dd],
             )
 
         # ── Tab 3: Models ───────────────────────────────────────────
@@ -615,6 +695,7 @@ def _build_app(state: AppState) -> gr.Blocks:
                 )
 
             with gr.Row():
+                lib_regen_btn = gr.Button("Re-generate", variant="secondary", scale=0, min_width=150)
                 lib_del_btn = gr.Button("Delete Selected", variant="stop", scale=0, min_width=150)
                 lib_clear_btn = gr.Button("Clear All History", variant="stop", scale=0, min_width=160)
                 lib_status = gr.Textbox(label="Status", interactive=False, scale=2)
@@ -692,6 +773,30 @@ def _build_app(state: AppState) -> gr.Blocks:
                 outputs=[lib_table, lib_status, lib_selected_id, lib_audio, lib_transcript, lib_model_dd, lib_voice_dd],
             )
 
+            def _lib_regen(selected_id):
+                if not selected_id:
+                    return gr.skip(), gr.skip(), gr.skip(), "No record selected."
+                record = callbacks.library_get_record(state, selected_id)
+                if record is None:
+                    return gr.skip(), gr.skip(), gr.skip(), "Record not found."
+                if record.model_id not in state.config.models:
+                    return (
+                        gr.skip(), gr.skip(), gr.skip(),
+                        f"Model '{record.model_name}' no longer exists.",
+                    )
+                return (
+                    gr.Dropdown(value=record.model_id),
+                    gr.Dropdown(value=record.voice_id),
+                    record.text,
+                    "Loaded to Generate tab.",
+                )
+
+            lib_regen_btn.click(
+                fn=_lib_regen,
+                inputs=[lib_selected_id],
+                outputs=[model_dd, voice_dd, text_input, lib_status],
+            )
+
         # ── Tab select: hydrate components from current config ────
 
         def _on_generate_tab():
@@ -713,12 +818,14 @@ def _build_app(state: AppState) -> gr.Blocks:
         )
 
         def _on_voices_tab():
+            uchoices = callbacks.user_voice_choices(state.config)
             return (
                 callbacks._voices_table(state.config),
-                gr.Dropdown(choices=callbacks.user_voice_choices(state.config)),
+                gr.Dropdown(choices=uchoices),
+                gr.Dropdown(choices=uchoices),
             )
 
-        voices_tab.select(fn=_on_voices_tab, outputs=[v_table, v_del_dd])
+        voices_tab.select(fn=_on_voices_tab, outputs=[v_table, v_del_dd, v_edit_dd])
 
         def _on_models_tab():
             choices = callbacks.model_choices(state.config)

@@ -19,6 +19,7 @@ from rho_tts.isolation.protocol import (
     SHUTDOWN,
     encode_message,
 )
+from rho_tts.result import GenerationResult
 
 
 class TestWorkerProtocol:
@@ -33,10 +34,29 @@ class TestWorkerProtocol:
         mock_tts = MagicMock()
         mock_tts.sample_rate = 24000
 
-        def _mock_generate(texts, output_path, cancellation_token=None):
+        def _mock_generate(texts, output_path=None, cancellation_token=None,
+                          format="wav", speed=1.0, pitch_semitones=0.0):
             if isinstance(texts, str):
-                return output_path
-            return [f"{output_path}_{i}.wav" for i in range(len(texts))]
+                return GenerationResult(
+                    path=output_path,
+                    audio=torch.zeros(24000),
+                    sample_rate=24000,
+                    duration_sec=1.0,
+                    segments_count=1,
+                    format=format,
+                )
+            results = []
+            for i in range(len(texts)):
+                p = f"{output_path}_{i}.wav" if output_path else None
+                results.append(GenerationResult(
+                    path=p,
+                    audio=torch.zeros(24000),
+                    sample_rate=24000,
+                    duration_sec=1.0,
+                    segments_count=1,
+                    format=format,
+                ))
+            return results
 
         mock_tts.generate.side_effect = _mock_generate
 
