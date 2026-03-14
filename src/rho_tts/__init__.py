@@ -25,7 +25,7 @@ Context manager:
         result = tts.generate("Hello world!", "output.wav")
 """
 
-__version__ = "0.1.0"
+__version__ = "1.0.4"
 
 from .base_tts import BaseTTS
 from .cancellation import CancellationToken, CancelledException
@@ -55,6 +55,7 @@ __all__ = [
     "FormatConversionError",
     "__version__",
     "launch_ui",
+    "train_drift_classifier",
 ]
 
 
@@ -63,3 +64,32 @@ def launch_ui(**kwargs):
     from .ui import launch_ui as _launch_ui
 
     _launch_ui(**kwargs)
+
+
+def train_drift_classifier(
+    dataset_dir: str,
+    voice_id: str | None = None,
+    output_path: str | None = None,
+    progress_callback=None,
+):
+    """Train a drift-detection classifier. Requires ``pip install rho-tts[validation]``.
+
+    Args:
+        dataset_dir: Directory containing 'good/' and 'bad/' subdirectories with .wav files.
+        voice_id: Voice ID to associate with this model.
+        output_path: Explicit path to save the trained model.
+        progress_callback: Optional callable receiving progress messages.
+    """
+    try:
+        from .validation.classifier.trainer import train
+    except ImportError:
+        raise ImportError(
+            "Training a drift classifier requires the validation extras. "
+            "Install with: pip install rho-tts[validation]"
+        )
+    return train(
+        dataset_dir=dataset_dir,
+        voice_id=voice_id,
+        output_path=output_path,
+        progress_callback=progress_callback,
+    )

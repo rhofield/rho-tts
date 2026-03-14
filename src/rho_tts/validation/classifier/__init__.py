@@ -24,7 +24,7 @@ def get_model_path(voice_id: str) -> str:
 
 def _load_model(model_path: Optional[str] = None, voice_id: Optional[str] = None):
     """Load the voice quality classifier model into the per-voice cache."""
-    cache_key = voice_id or "__global__"
+    cache_key = model_path if model_path is not None else (voice_id or "__global__")
 
     if cache_key in _models:
         return
@@ -98,7 +98,7 @@ def predict_accent_drift_probability(
     """
     _load_model(model_path, voice_id)
 
-    cache_key = voice_id or "__global__"
+    cache_key = model_path if model_path is not None else (voice_id or "__global__")
     model = _models.get(cache_key)
 
     if model is None:

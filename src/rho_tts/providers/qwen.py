@@ -30,14 +30,18 @@ class QwenTTS(BaseTTS):
         reference_text: Transcript of the reference audio (required when reference_audio is set)
         model_path: Path to local model or HuggingFace model ID
             (default: "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
-        max_chars_per_segment: Maximum characters per text segment (default: 1000)
+        max_chars_per_segment: Maximum characters per text segment (default: auto-computed)
         batch_size: Number of texts to process per batch (default: 5)
         max_iterations: Maximum validation retry iterations (default: 10)
         accent_drift_threshold: Threshold for accent drift validation (default: 0.17)
         text_similarity_threshold: Threshold for STT text matching (default: 0.85)
         sound_decay_threshold: Max ratio of final to initial RMS energy (default: 0.3)
+        drift_model_path: Explicit path to a .pkl drift classifier model (overrides voice_id lookup)
         phonetic_mapping: Custom word-to-pronunciation mapping
     """
+
+    MAX_MODEL_CHARS = 4000
+    BYTES_PER_CHAR_ESTIMATE = 500_000
 
     def __init__(
         self,
@@ -49,12 +53,13 @@ class QwenTTS(BaseTTS):
         speaker: Optional[str] = None,
         language: str = "English",
         model_path: str = "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
-        max_chars_per_segment: int = 1000,
+        max_chars_per_segment: Optional[int] = None,
         batch_size: int = 5,
         max_iterations: int = 10,
         accent_drift_threshold: float = 0.17,
         text_similarity_threshold: float = 0.85,
         sound_decay_threshold: float = 0.3,
+        drift_model_path: Optional[str] = None,
         phonetic_mapping: Optional[Dict[str, str]] = None,
     ):
         super().__init__(device, seed, deterministic, phonetic_mapping=phonetic_mapping)
@@ -68,9 +73,11 @@ class QwenTTS(BaseTTS):
         self.language = language
         self.voice_cloning = reference_audio is not None
         self.model_path = model_path
+        self.drift_model_path = drift_model_path
 
         # Configurable thresholds
-        self.max_chars_per_segment = max_chars_per_segment
+        self._max_chars_explicit = max_chars_per_segment is not None
+        self.max_chars_per_segment = max_chars_per_segment if max_chars_per_segment is not None else 1000
         self.batch_size = batch_size
         self.force_sentence_split = False
         self.max_iterations = max_iterations
@@ -124,6 +131,16 @@ class QwenTTS(BaseTTS):
                 )
             except Exception as e:
                 raise RuntimeError(f"Failed to load Qwen3-TTS model: {e}")
+
+            # Refine max model chars from config if available
+            try:
+                config = getattr(self.qwen3_model, 'config', None)
+                if config is not None:
+                    max_pos = getattr(config, 'max_position_embeddings', None)
+                    if max_pos is not None:
+                        self._max_model_chars = min(self.MAX_MODEL_CHARS, max_pos)
+            except Exception:
+                pass
 
         return self.qwen3_model
 

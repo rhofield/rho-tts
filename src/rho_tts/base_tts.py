@@ -35,6 +35,9 @@ DEFAULT_PHONETIC_MAPPING: Dict[str, str] = {}
 class BaseTTS(ABC):
     """Abstract base class for TTS implementations."""
 
+    MAX_MODEL_CHARS = 3000
+    BYTES_PER_CHAR_ESTIMATE = 500_000
+
     def __init__(
         self,
         device: str = "cuda",
@@ -76,6 +79,13 @@ class BaseTTS(ABC):
 
         # Voice ID for per-voice classifier model lookup (set by UI state)
         self.voice_id: Optional[str] = None
+
+        # Custom drift classifier model path (overrides voice_id lookup)
+        self.drift_model_path: Optional[str] = None
+
+        # Smart segmentation state
+        self._max_chars_explicit = False
+        self._max_model_chars = self.MAX_MODEL_CHARS
 
         # Voice encoder for speaker similarity validation (lazy loaded)
         self._voice_encoder = None
@@ -136,6 +146,35 @@ class BaseTTS(ABC):
             torch.backends.cudnn.deterministic = False
             torch.backends.cudnn.benchmark = True
 
+    def _get_available_memory_bytes(self) -> int:
+        """Get available memory: VRAM on GPU, system RAM on CPU."""
+        if self.device == "cuda" and torch.cuda.is_available():
+            free, _total = torch.cuda.mem_get_info()
+            return free
+        try:
+            import psutil
+            return psutil.virtual_memory().available
+        except ImportError:
+            try:
+                mem_bytes = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_AVPHYS_PAGES')
+                return mem_bytes
+            except (ValueError, OSError):
+                return 8 * 1024**3  # conservative 8GB default
+
+    def _compute_max_chars(self) -> int:
+        """Compute max chars based on model limit and 80% of available resources."""
+        if self._max_chars_explicit:
+            return self.max_chars_per_segment
+
+        model_max = self._max_model_chars
+        bytes_per_char = self.BYTES_PER_CHAR_ESTIMATE
+
+        available = self._get_available_memory_bytes()
+        resource_max = int(available / bytes_per_char) if bytes_per_char > 0 else model_max
+
+        effective = int(min(model_max, resource_max) * 0.8)
+        return max(effective, 200)
+
     def _apply_phonetic_mapping(self, text: str) -> str:
         """
         Apply phonetic mappings to improve TTS pronunciation.
@@ -157,7 +196,9 @@ class BaseTTS(ABC):
             return 0.0, True
         try:
             from .validation.classifier import predict_accent_drift_probability
-            drift_prob = predict_accent_drift_probability(audio_path, voice_id=self.voice_id)
+            drift_prob = predict_accent_drift_probability(
+                audio_path, voice_id=self.voice_id, model_path=self.drift_model_path,
+            )
             if drift_prob is None:
                 return 0.0, True
             return drift_prob, drift_prob < self.accent_drift_threshold
@@ -582,7 +623,8 @@ class BaseTTS(ABC):
             if token.is_cancelled():
                 raise CancelledException(f"Cancelled during text item {idx}")
 
-            segments = self._split_text_into_segments(text, self.max_chars_per_segment)
+            effective_max_chars = self._compute_max_chars()
+            segments = self._split_text_into_segments(text, effective_max_chars)
             logger.info(f"Text item {idx + 1}: {len(text)} chars -> {len(segments)} segment(s)")
 
             audio_segments = []
@@ -939,7 +981,8 @@ class BaseTTS(ABC):
         """
         token = cancellation_token or CancellationToken()
         mapped_text = self._apply_phonetic_mapping(text)
-        segments = self._split_text_into_segments(mapped_text, self.max_chars_per_segment)
+        effective_max_chars = self._compute_max_chars()
+        segments = self._split_text_into_segments(mapped_text, effective_max_chars)
 
         for seg_idx, segment in enumerate(segments):
             if token.is_cancelled():

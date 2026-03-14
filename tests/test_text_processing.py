@@ -22,6 +22,10 @@ class ConcreteTTS(BaseTTS):
         self._voice_encoder = None
         self.reference_embedding = None
         self._sample_rate = 24000
+        self.voice_id = None
+        self.drift_model_path = None
+        self._max_chars_explicit = True
+        self._max_model_chars = 3000
 
     def _generate_audio(self, text, **kwargs):
         pass

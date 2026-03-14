@@ -28,14 +28,18 @@ class ChatterboxTTS(BaseTTS):
         reference_audio: Path to audio file for voice cloning (optional).
             If not provided, uses the model's default voice.
         implementation: "standard" or "faster" (rsxdalv optimizations)
-        max_chars_per_segment: Max characters per text segment (default: 800)
+        max_chars_per_segment: Max characters per text segment (default: auto-computed)
         max_iterations: Maximum validation retry iterations (default: 50)
         accent_drift_threshold: Threshold for accent drift (default: 0.17)
         text_similarity_threshold: Min similarity for STT validation (default: 0.75)
+        drift_model_path: Explicit path to a .pkl drift classifier model (overrides voice_id lookup)
         phonetic_mapping: Custom word-to-pronunciation mapping
         temperature: Sampling temperature for generation (default: 1.0)
         cfg_weight: Classifier-free guidance weight (default: 0.6)
     """
+
+    MAX_MODEL_CHARS = 3000
+    BYTES_PER_CHAR_ESTIMATE = 600_000
 
     def __init__(
         self,
@@ -44,10 +48,11 @@ class ChatterboxTTS(BaseTTS):
         deterministic: bool = False,
         reference_audio: Optional[str] = None,
         implementation: str = "standard",
-        max_chars_per_segment: int = 800,
+        max_chars_per_segment: Optional[int] = None,
         max_iterations: int = 50,
         accent_drift_threshold: float = 0.17,
         text_similarity_threshold: float = 0.75,
+        drift_model_path: Optional[str] = None,
         phonetic_mapping: Optional[Dict[str, str]] = None,
         temperature: float = 1.0,
         cfg_weight: float = 0.6,
@@ -60,9 +65,11 @@ class ChatterboxTTS(BaseTTS):
         self.reference_audio_path = reference_audio
         self.voice_cloning = reference_audio is not None
         self.implementation = implementation
+        self.drift_model_path = drift_model_path
 
         # Configurable thresholds
-        self.max_chars_per_segment = max_chars_per_segment
+        self._max_chars_explicit = max_chars_per_segment is not None
+        self.max_chars_per_segment = max_chars_per_segment if max_chars_per_segment is not None else 800
         self.max_iterations = max_iterations
         self.accent_drift_threshold = accent_drift_threshold
         self.text_similarity_threshold = text_similarity_threshold

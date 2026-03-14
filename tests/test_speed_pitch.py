@@ -28,6 +28,9 @@ class FakeTTS(BaseTTS):
         self.accent_drift_threshold = 0.17
         self.text_similarity_threshold = 0.85
         self.voice_id = None
+        self.drift_model_path = None
+        self._max_chars_explicit = True
+        self._max_model_chars = 3000
 
     def _generate_audio(self, text, **kwargs):
         # Return 1 second of a sine wave (more interesting than silence for pitch tests)

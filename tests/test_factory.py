@@ -26,6 +26,10 @@ class MockTTS(BaseTTS):
         self.reference_embedding = None
         self._sample_rate = 16000
         self.kwargs = kwargs
+        self.voice_id = None
+        self.drift_model_path = None
+        self._max_chars_explicit = True
+        self._max_model_chars = 3000
 
     def _generate_audio(self, text, **kwargs):
         return torch.zeros(self._sample_rate)
