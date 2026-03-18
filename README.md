@@ -226,7 +226,7 @@ A Gradio-based web interface for interactive TTS generation, voice management, a
 ### Installation
 
 ```bash
-# From PyPI (once published)
+# From PyPI
 pip install rho-tts[ui]
 
 # From local source
@@ -257,6 +257,16 @@ rho-tts-ui --host 0.0.0.0 --port 8080 --device cpu --share
 The config path can also be set via the `RHO_TTS_CONFIG` environment variable.
 
 ### Tabs
+
+![Generate](rho-tts-generate.JPG)
+
+![Library](rho-tts-library.JPG)
+
+![Voices](rho-ttts-voices.JPG)
+
+![Models](rho-tts-models.JPG)
+
+![Training](rho-tts-training.JPG)
 
 - **Generate** — Select a model and voice, enter text, and generate audio with real-time playback. Includes phonetic mapping overrides per voice/model pair.
 - **Voices** — Upload reference audio and transcripts to create reusable voice profiles (stored in `~/.rho_tts/voices/`).

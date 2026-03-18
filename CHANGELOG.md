@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.6] - 2026-03-19
+
+### Added
+- Screenshots of all five UI tabs in the README (Generate, Library, Voices, Models, Training)
+
+### Changed
+- Version bump to 1.0.6
+- README installation instructions updated to reflect PyPI availability (removed "once published" qualifier)
+
+### Fixed
+- Synced `__init__.py` version with `pyproject.toml`
+
 ## [1.0.5] - 2026-03-15
 
 ### Added
