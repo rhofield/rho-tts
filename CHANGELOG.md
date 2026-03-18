@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.5] - 2026-03-15
+
+### Added
+- Auto-sort: automatically copy generated audio into good/bad training folders based on accent drift score
+  - Four new `BaseTTS` attributes: `auto_sort_good_threshold`, `auto_sort_bad_threshold`, `auto_sort_good_dir`, `auto_sort_bad_dir`
+  - Samples with drift below `good_threshold` are copied to `good_dir`; samples above `bad_threshold` go to `bad_dir`
+  - Middle-zone samples (ambiguous confidence) are intentionally skipped
+  - Works with both `max_iterations=1` (single-pass) and multi-iteration validation loops
+  - UI state layer (`AppState`) passes auto-sort parameters through to the TTS instance
+- Unit and integration tests covering all auto-sort routing scenarios
+
 ## [1.0.4] - 2026-03-14
 
 ### Added

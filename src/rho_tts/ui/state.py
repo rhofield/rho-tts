@@ -28,6 +28,11 @@ from .config import (
 
 logger = logging.getLogger(__name__)
 
+_AUTO_SORT_KEYS = {
+    "auto_sort_good_threshold", "auto_sort_bad_threshold",
+    "auto_sort_good_dir", "auto_sort_bad_dir",
+}
+
 
 class AppState:
     """
@@ -118,12 +123,17 @@ class AppState:
                 if model_config.provider == "qwen" and voice_profile.reference_text:
                     kwargs["reference_text"] = voice_profile.reference_text
 
+            # Extract auto-sort params before passing to factory
+            auto_sort_params = {k: kwargs.pop(k) for k in list(kwargs) if k in _AUTO_SORT_KEYS}
+
             logger.info(f"Creating TTS instance: provider={model_config.provider}, voice={voice_id}")
             self._active_tts = TTSFactory.get_tts_instance(
                 provider=model_config.provider,
                 **kwargs,
             )
             self._active_tts.voice_id = voice_profile.id if voice_profile else None
+            for k, v in auto_sort_params.items():
+                setattr(self._active_tts, k, v)
             self._cache_key = new_key
             return self._active_tts
 

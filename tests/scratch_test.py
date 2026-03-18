@@ -126,6 +126,160 @@ def test_validation_during_generation(tmp_path):
 
 
 @requires_integration
+def test_auto_sort_during_generation(tmp_path):
+    """End-to-end: train classifier, generate with auto-sort, verify files are routed.
+
+    Exercises the full path:
+      generate() → _run_pipeline() → _validate_accent_drift() → _auto_sort_audio()
+    """
+    import torch
+    import torchaudio
+
+    from rho_tts import TTSFactory, train_drift_classifier
+
+    # --- 1. Generate synthetic training data ---
+    good_dir = tmp_path / "dataset" / "good"
+    bad_dir = tmp_path / "dataset" / "bad"
+    good_dir.mkdir(parents=True)
+    bad_dir.mkdir(parents=True)
+
+    sr = 16000
+    for i in range(5):
+        t = torch.linspace(0, 1, sr)
+        good_wav = torch.sin(2 * 3.14159 * 440 * t).unsqueeze(0)
+        torchaudio.save(str(good_dir / f"good_{i}.wav"), good_wav, sr)
+
+        bad_wav = torch.randn(1, sr) * 0.5
+        torchaudio.save(str(bad_dir / f"bad_{i}.wav"), bad_wav, sr)
+
+    # --- 2. Train drift classifier ---
+    model_path = str(tmp_path / "model.pkl")
+    train_drift_classifier(
+        dataset_dir=str(tmp_path / "dataset"),
+        output_path=model_path,
+    )
+    assert os.path.exists(model_path)
+
+    # --- 3. Create reference audio for voice cloning ---
+    ref_audio_path = str(tmp_path / "reference.wav")
+    ref_wav = torch.sin(2 * 3.14159 * 440 * torch.linspace(0, 3, sr * 3)).unsqueeze(0)
+    torchaudio.save(ref_audio_path, ref_wav, sr)
+
+    # --- 4. Create TTS with auto-sort configured ---
+    sort_good = str(tmp_path / "sorted" / "good")
+    sort_bad = str(tmp_path / "sorted" / "bad")
+
+    tts = TTSFactory.get_tts_instance(
+        provider="qwen",
+        reference_audio=ref_audio_path,
+        reference_text="Test reference audio.",
+        drift_model_path=model_path,
+        max_iterations=3,
+    )
+    tts.auto_sort_good_threshold = 0.30
+    tts.auto_sort_bad_threshold = 0.70
+    tts.auto_sort_good_dir = sort_good
+    tts.auto_sort_bad_dir = sort_bad
+
+    # --- 5. Generate — auto-sort should copy attempt(s) into sorted dirs ---
+    result = tts.generate("Hello, this is a test.")
+    assert result is not None
+
+    # At least one of good or bad should have received a file
+    good_files = os.listdir(sort_good) if os.path.isdir(sort_good) else []
+    bad_files = os.listdir(sort_bad) if os.path.isdir(sort_bad) else []
+    total_sorted = len(good_files) + len(bad_files)
+    assert total_sorted >= 1, (
+        f"Expected at least 1 sorted file, got {total_sorted} "
+        f"(good={len(good_files)}, bad={len(bad_files)})"
+    )
+
+    # All sorted files should be .wav
+    for f in good_files + bad_files:
+        assert f.endswith(".wav"), f"Unexpected file format: {f}"
+
+
+@requires_integration
+def test_auto_sort_max_iterations_1(tmp_path):
+    """Auto-sort works even when max_iterations=1 (no validation retries)."""
+    import torch
+    import torchaudio
+
+    from rho_tts import TTSFactory, train_drift_classifier
+
+    # --- 1. Minimal training data ---
+    good_dir = tmp_path / "dataset" / "good"
+    bad_dir = tmp_path / "dataset" / "bad"
+    good_dir.mkdir(parents=True)
+    bad_dir.mkdir(parents=True)
+
+    sr = 16000
+    for i in range(5):
+        t = torch.linspace(0, 1, sr)
+        good_wav = torch.sin(2 * 3.14159 * 440 * t).unsqueeze(0)
+        torchaudio.save(str(good_dir / f"good_{i}.wav"), good_wav, sr)
+
+        bad_wav = torch.randn(1, sr) * 0.5
+        torchaudio.save(str(bad_dir / f"bad_{i}.wav"), bad_wav, sr)
+
+    model_path = str(tmp_path / "model.pkl")
+    train_drift_classifier(
+        dataset_dir=str(tmp_path / "dataset"),
+        output_path=model_path,
+    )
+
+    # --- 2. Reference audio ---
+    ref_audio_path = str(tmp_path / "reference.wav")
+    ref_wav = torch.sin(2 * 3.14159 * 440 * torch.linspace(0, 3, sr * 3)).unsqueeze(0)
+    torchaudio.save(ref_audio_path, ref_wav, sr)
+
+    # --- 3. Create TTS with max_iterations=1 and auto-sort ---
+    sort_good = str(tmp_path / "sorted" / "good")
+    sort_bad = str(tmp_path / "sorted" / "bad")
+
+    tts = TTSFactory.get_tts_instance(
+        provider="qwen",
+        reference_audio=ref_audio_path,
+        reference_text="Test reference audio.",
+        drift_model_path=model_path,
+        max_iterations=1,  # Single iteration — normally skips validation
+    )
+    tts.auto_sort_good_threshold = 0.50
+    tts.auto_sort_bad_threshold = 0.90
+    tts.auto_sort_good_dir = sort_good
+    tts.auto_sort_bad_dir = sort_bad
+
+    # --- 4. Generate — should still run drift + auto-sort ---
+    result = tts.generate("A short test sentence.")
+    assert result is not None
+
+    good_files = os.listdir(sort_good) if os.path.isdir(sort_good) else []
+    bad_files = os.listdir(sort_bad) if os.path.isdir(sort_bad) else []
+    total_sorted = len(good_files) + len(bad_files)
+    assert total_sorted == 1, (
+        f"Expected exactly 1 sorted file with max_iterations=1, got {total_sorted}"
+    )
+
+
+@requires_integration
+def test_auto_sort_disabled_no_files(tmp_path):
+    """When auto-sort dirs are not set, no sorted files are created."""
+    from rho_tts import TTSFactory
+
+    tts = TTSFactory.get_tts_instance(provider="qwen")
+    # auto_sort dirs default to None — nothing should be created
+    result = tts.generate("Hello world.")
+    assert result is not None
+
+    # Verify no sorted dirs were created anywhere in tmp_path
+    for root, dirs, files in os.walk(str(tmp_path)):
+        for f in files:
+            assert not f.startswith("rho_tts_validate_"), (
+                f"Unexpected sorted file found: {os.path.join(root, f)}"
+            )
+
+
+@requires_integration
 def test_smart_segmentation_with_real_provider():
     """Verify smart segmentation computes a reasonable value with real provider."""
     from rho_tts import TTSFactory

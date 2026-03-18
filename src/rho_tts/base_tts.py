@@ -8,6 +8,7 @@ import asyncio
 import logging
 import os
 import random
+import shutil
 import tempfile
 import time
 import traceback
@@ -82,6 +83,12 @@ class BaseTTS(ABC):
 
         # Custom drift classifier model path (overrides voice_id lookup)
         self.drift_model_path: Optional[str] = None
+
+        # Auto-sort: copy attempts to good/bad training folders after drift detection
+        self.auto_sort_good_threshold: Optional[float] = None
+        self.auto_sort_bad_threshold: Optional[float] = None
+        self.auto_sort_good_dir: Optional[str] = None
+        self.auto_sort_bad_dir: Optional[str] = None
 
         # Smart segmentation state
         self._max_chars_explicit = False
@@ -205,6 +212,30 @@ class BaseTTS(ABC):
         except ImportError:
             logger.debug("Accent drift classifier not available, skipping validation")
             return 0.0, True
+
+    def _auto_sort_audio(self, temp_path: str, drift_prob: float) -> None:
+        """Copy audio to good/ or bad/ training folder based on drift score."""
+        good_dir = getattr(self, 'auto_sort_good_dir', None)
+        bad_dir = getattr(self, 'auto_sort_bad_dir', None)
+        good_thresh = getattr(self, 'auto_sort_good_threshold', None)
+        bad_thresh = getattr(self, 'auto_sort_bad_threshold', None)
+        if good_dir is None and bad_dir is None:
+            return
+        if good_dir and good_thresh is not None:
+            if drift_prob < good_thresh:
+                os.makedirs(good_dir, exist_ok=True)
+                dest = os.path.join(good_dir, os.path.basename(temp_path))
+                shutil.copy2(temp_path, dest)
+                logger.info(f"      Auto-sorted to good: {dest}")
+                return
+        if bad_dir and bad_thresh is not None:
+            if drift_prob > bad_thresh:
+                os.makedirs(bad_dir, exist_ok=True)
+                dest = os.path.join(bad_dir, os.path.basename(temp_path))
+                shutil.copy2(temp_path, dest)
+                logger.info(f"      Auto-sorted to bad: {dest}")
+                return
+        # Middle zone: skip
 
     def _validate_text_match(self, audio_path: str, expected_text: str) -> tuple:
         """Run STT text matching validation if available."""
@@ -680,6 +711,23 @@ class BaseTTS(ABC):
                     # Skip validation when max_iterations == 1
                     if self.max_iterations == 1:
                         best_audio = audio
+                        if getattr(self, 'auto_sort_good_dir', None) or getattr(self, 'auto_sort_bad_dir', None):
+                            # Run drift detection for auto-sort even without validation retries
+                            fd, temp_path = tempfile.mkstemp(suffix=".wav", prefix="rho_tts_validate_")
+                            os.close(fd)
+                            try:
+                                save_wav = audio.cpu() if audio.device.type != 'cpu' else audio
+                                if save_wav.dim() == 1:
+                                    save_wav = save_wav.unsqueeze(0)
+                                self._save_wav(temp_path, save_wav, self.sample_rate)
+                                drift_prob, _ = self._validate_accent_drift(temp_path)
+                                self._auto_sort_audio(temp_path, drift_prob)
+                            finally:
+                                if os.path.exists(temp_path):
+                                    try:
+                                        os.remove(temp_path)
+                                    except OSError:
+                                        pass
                         break
 
                     fd, temp_path = tempfile.mkstemp(suffix=".wav", prefix="rho_tts_validate_")
@@ -691,6 +739,7 @@ class BaseTTS(ABC):
                         self._save_wav(temp_path, save_wav, self.sample_rate)
 
                         drift_prob, is_voice_ok = self._validate_accent_drift(temp_path)
+                        self._auto_sort_audio(temp_path, drift_prob)
 
                         if drift_prob < best_drift:
                             best_drift = drift_prob
