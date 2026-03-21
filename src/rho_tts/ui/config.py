@@ -364,14 +364,18 @@ def save_history(records: List[GenerationRecord], path: Optional[str] = None) ->
         json.dump([r.to_dict() for r in records], f, indent=2)
 
 
-def copy_voice_audio(source_path: str, voice_id: str) -> str:
+def copy_voice_audio(source_path: str, voice_id: str, dest_dir: Optional[str] = None) -> str:
     """
     Copy a voice reference audio file into the managed voices directory.
 
-    Returns the destination path inside ~/.rho_tts/voices/.
+    When *dest_dir* is provided (e.g. a session temp dir), audio is stored
+    there instead of the shared ``~/.rho_tts/voices/`` directory.
+
+    Returns the destination path.
     """
-    os.makedirs(DEFAULT_VOICES_DIR, exist_ok=True)
+    target_dir = dest_dir or DEFAULT_VOICES_DIR
+    os.makedirs(target_dir, exist_ok=True)
     ext = os.path.splitext(source_path)[1] or ".wav"
-    dest = os.path.join(DEFAULT_VOICES_DIR, f"{voice_id}{ext}")
+    dest = os.path.join(target_dir, f"{voice_id}{ext}")
     shutil.copy2(source_path, dest)
     return dest

@@ -10,36 +10,57 @@ Five-tab layout:
 """
 
 import argparse
+import copy
 import logging
 import os
+import uuid
 from typing import Optional
 
 import gradio as gr
 
 from . import callbacks
 from .config import PROVIDER_MODELS, get_provider_model_choices, get_provider_model_defaults, is_model_cached, load_config
+from .session import SessionContext
 from .state import AppState
 
 logger = logging.getLogger(__name__)
 
 
-def _build_app(state: AppState) -> gr.Blocks:
+def _build_app(state: AppState, multi_user: bool = False) -> gr.Blocks:
     """Construct the Gradio Blocks UI and wire all events."""
 
     with gr.Blocks(title="rho-tts Studio") as app:
 
+        # Per-session state for multi-user isolation
+        if multi_user:
+            session_state = gr.State(
+                value=lambda: SessionContext(
+                    session_id=uuid.uuid4().hex,
+                    config=copy.deepcopy(state.config),
+                ),
+                delete_callback=lambda ctx: ctx.cleanup(),
+            )
+        else:
+            session_state = gr.State(value=None)
+
         # ── shared helpers ──────────────────────────────────────────
 
-        def _voice_choices(model_id=None):
+        def _cfg(session):
+            """Return the right config: session's deep copy or shared."""
+            return session.config if session else state.config
+
+        def _voice_choices(model_id=None, config=None):
+            cfg = config or state.config
             return gr.Dropdown(
-                choices=callbacks.voice_choices_for_model(state.config, model_id),
+                choices=callbacks.voice_choices_for_model(cfg, model_id),
             )
 
-        def _model_choices():
-            return gr.Dropdown(choices=callbacks.model_choices(state.config))
+        def _model_choices(config=None):
+            cfg = config or state.config
+            return gr.Dropdown(choices=callbacks.model_choices(cfg))
 
-        def _refresh_dropdowns(model_id=None):
-            return _model_choices(), _voice_choices(model_id)
+        def _refresh_dropdowns(model_id=None, config=None):
+            return _model_choices(config), _voice_choices(model_id, config)
 
         # ── Tab 1: Generate ─────────────────────────────────────────
 
@@ -52,6 +73,7 @@ def _build_app(state: AppState) -> gr.Blocks:
                     label="Device",
                     scale=0,
                     min_width=120,
+                    visible=not multi_user,
                 )
 
             with gr.Row():
@@ -147,30 +169,32 @@ def _build_app(state: AppState) -> gr.Blocks:
 
             device_dd.change(fn=_on_device_change, inputs=[device_dd])
 
-            def _on_voice_change(voice_id, model_id):
+            def _on_voice_change(voice_id, model_id, session):
                 """Reload phonetic mapping and params when voice changes."""
-                rows, mapping_label_val = callbacks.load_phonetic_mapping(state, voice_id, model_id)
-                seed, max_iter, accent, text_sim, temp, cfg, plabel, is_cb = \
-                    callbacks.load_model_voice_params(state, voice_id, model_id)
+                cfg = _cfg(session)
+                rows, mapping_label_val = callbacks.load_phonetic_mapping(state, voice_id, model_id, config=cfg)
+                seed, max_iter, accent, text_sim, temp, cfg_w, plabel, is_cb = \
+                    callbacks.load_model_voice_params(state, voice_id, model_id, config=cfg)
                 return (
                     rows, mapping_label_val,
                     seed, max_iter, accent, text_sim,
                     gr.update(value=temp, visible=is_cb),
-                    gr.update(value=cfg, visible=is_cb),
+                    gr.update(value=cfg_w, visible=is_cb),
                     plabel,
                 )
 
-            def _on_model_change(voice_id, model_id):
+            def _on_model_change(voice_id, model_id, session):
                 """Filter voices for provider and reload phonetic mapping and params."""
-                choices = callbacks.voice_choices_for_model(state.config, model_id)
+                cfg = _cfg(session)
+                choices = callbacks.voice_choices_for_model(cfg, model_id)
                 valid_ids = {c[1] for c in choices}
                 new_voice_id = voice_id if voice_id in valid_ids else None
                 rows, mapping_label_val = callbacks.load_phonetic_mapping(
-                    state, new_voice_id, model_id,
+                    state, new_voice_id, model_id, config=cfg,
                 )
-                seed, max_iter, accent, text_sim, temp, cfg, plabel, is_cb = \
-                    callbacks.load_model_voice_params(state, new_voice_id, model_id)
-                status = callbacks.status_for_model_voice(state.config, model_id, choices)
+                seed, max_iter, accent, text_sim, temp, cfg_w, plabel, is_cb = \
+                    callbacks.load_model_voice_params(state, new_voice_id, model_id, config=cfg)
+                status = callbacks.status_for_model_voice(cfg, model_id, choices)
                 return (
                     gr.Dropdown(choices=choices, value=new_voice_id),
                     rows,
@@ -178,13 +202,13 @@ def _build_app(state: AppState) -> gr.Blocks:
                     status,
                     seed, max_iter, accent, text_sim,
                     gr.update(value=temp, visible=is_cb),
-                    gr.update(value=cfg, visible=is_cb),
+                    gr.update(value=cfg_w, visible=is_cb),
                     plabel,
                 )
 
             voice_dd.change(
                 fn=_on_voice_change,
-                inputs=[voice_dd, model_dd],
+                inputs=[voice_dd, model_dd, session_state],
                 outputs=[
                     mapping_df, mapping_label,
                     params_seed, params_max_iter, params_accent, params_text_sim,
@@ -193,7 +217,7 @@ def _build_app(state: AppState) -> gr.Blocks:
             )
             model_dd.change(
                 fn=_on_model_change,
-                inputs=[voice_dd, model_dd],
+                inputs=[voice_dd, model_dd, session_state],
                 outputs=[
                     voice_dd, mapping_df, mapping_label, status_box,
                     params_seed, params_max_iter, params_accent, params_text_sim,
@@ -201,9 +225,10 @@ def _build_app(state: AppState) -> gr.Blocks:
                 ],
             )
 
-            def _save_params(voice_id, model_id, seed, max_iter, accent, text_sim, temp, cfg):
+            def _save_params(voice_id, model_id, seed, max_iter, accent, text_sim, temp, cfg_w, session):
                 return callbacks.save_model_voice_params(
-                    state, voice_id, model_id, seed, max_iter, accent, text_sim, temp, cfg,
+                    state, voice_id, model_id, seed, max_iter, accent, text_sim, temp, cfg_w,
+                    session=session,
                 )
 
             save_params_btn.click(
@@ -212,36 +237,39 @@ def _build_app(state: AppState) -> gr.Blocks:
                     voice_dd, model_dd,
                     params_seed, params_max_iter, params_accent, params_text_sim,
                     params_temperature, params_cfg_weight,
+                    session_state,
                 ],
                 outputs=[params_status],
             )
 
-            def _generate(model_id, voice_id, text, speed, pitch, fmt):
+            def _generate(model_id, voice_id, text, speed, pitch, fmt, session):
                 yield from callbacks.generate_audio(
                     state, model_id, voice_id, text,
                     speed=speed, pitch_semitones=pitch, format=fmt,
+                    session=session,
                 )
 
             gen_btn.click(
                 fn=_generate,
-                inputs=[model_dd, voice_dd, text_input, params_speed, params_pitch, format_dd],
+                inputs=[model_dd, voice_dd, text_input, params_speed, params_pitch, format_dd, session_state],
                 outputs=[audio_out, status_box],
                 concurrency_limit=1,
             )
 
             cancel_btn.click(
-                fn=lambda: callbacks.cancel_generation(state),
+                fn=lambda session: callbacks.cancel_generation(state, session=session),
+                inputs=[session_state],
                 outputs=[status_box],
                 concurrency_limit=None,
             )
 
-            def _save_mapping(voice_id, model_id, df_data):
+            def _save_mapping(voice_id, model_id, df_data, session):
                 rows = df_data.values.tolist() if hasattr(df_data, "values") else df_data
-                return callbacks.save_phonetic_mapping(state, voice_id, model_id, rows)
+                return callbacks.save_phonetic_mapping(state, voice_id, model_id, rows, session=session)
 
             save_mapping_btn.click(
                 fn=_save_mapping,
-                inputs=[voice_dd, model_dd, mapping_df],
+                inputs=[voice_dd, model_dd, mapping_df, session_state],
                 outputs=[mapping_status],
             )
 
@@ -305,71 +333,76 @@ def _build_app(state: AppState) -> gr.Blocks:
 
             # -- Voice events --
 
-            def _add_voice(vname, vaudio, vref, vlang, vdesc, current_model_id):
+            def _add_voice(vname, vaudio, vref, vlang, vdesc, current_model_id, session):
+                cfg = _cfg(session)
                 table, msg = callbacks.add_voice(
                     state, vname, vaudio, vref, language=vlang, description=vdesc,
+                    session=session,
                 )
-                new_voice_dd = _voice_choices(current_model_id)
+                new_voice_dd = _voice_choices(current_model_id, config=cfg)
                 status = callbacks.status_for_model_voice(
-                    state.config, current_model_id, new_voice_dd.choices,
+                    cfg, current_model_id, new_voice_dd.choices,
                 )
-                uchoices = callbacks.user_voice_choices(state.config)
+                uchoices = callbacks.user_voice_choices(cfg)
                 return (
-                    table, msg, new_voice_dd, _model_choices(), status,
+                    table, msg, new_voice_dd, _model_choices(config=cfg), status,
                     gr.Dropdown(choices=uchoices), gr.Dropdown(choices=uchoices),
                 )
 
             v_add_btn.click(
                 fn=_add_voice,
-                inputs=[v_name, v_audio, v_ref_text, v_language, v_description, model_dd],
+                inputs=[v_name, v_audio, v_ref_text, v_language, v_description, model_dd, session_state],
                 outputs=[v_table, v_status, voice_dd, model_dd, status_box, v_del_dd, v_edit_dd],
             )
 
-            def _del_voice(vid, current_model_id):
-                table, msg = callbacks.delete_voice(state, vid)
-                new_voice_dd = _voice_choices(current_model_id)
+            def _del_voice(vid, current_model_id, session):
+                cfg = _cfg(session)
+                table, msg = callbacks.delete_voice(state, vid, session=session)
+                new_voice_dd = _voice_choices(current_model_id, config=cfg)
                 status = callbacks.status_for_model_voice(
-                    state.config, current_model_id, new_voice_dd.choices,
+                    cfg, current_model_id, new_voice_dd.choices,
                 )
-                uchoices = callbacks.user_voice_choices(state.config)
+                uchoices = callbacks.user_voice_choices(cfg)
                 return (
-                    table, msg, new_voice_dd, _model_choices(), status,
+                    table, msg, new_voice_dd, _model_choices(config=cfg), status,
                     gr.Dropdown(choices=uchoices), gr.Dropdown(choices=uchoices),
                 )
 
             v_del_btn.click(
                 fn=_del_voice,
-                inputs=[v_del_dd, model_dd],
+                inputs=[v_del_dd, model_dd, session_state],
                 outputs=[v_table, v_status, voice_dd, model_dd, status_box, v_del_dd, v_edit_dd],
             )
 
-            def _on_edit_voice_select(voice_id):
-                return callbacks.load_voice_for_edit(state, voice_id)
+            def _on_edit_voice_select(voice_id, session):
+                cfg = _cfg(session)
+                return callbacks.load_voice_for_edit(state, voice_id, config=cfg)
 
             v_edit_dd.change(
                 fn=_on_edit_voice_select,
-                inputs=[v_edit_dd],
+                inputs=[v_edit_dd, session_state],
                 outputs=[v_edit_name, v_edit_language, v_edit_description, v_edit_ref_text],
             )
 
-            def _edit_voice(vid, vname, vlang, vdesc, vref, current_model_id):
+            def _edit_voice(vid, vname, vlang, vdesc, vref, current_model_id, session):
+                cfg = _cfg(session)
                 table, msg = callbacks.edit_voice(
-                    state, vid, vname, vlang, vdesc, vref,
+                    state, vid, vname, vlang, vdesc, vref, session=session,
                 )
-                new_voice_dd = _voice_choices(current_model_id)
+                new_voice_dd = _voice_choices(current_model_id, config=cfg)
                 status = callbacks.status_for_model_voice(
-                    state.config, current_model_id, new_voice_dd.choices,
+                    cfg, current_model_id, new_voice_dd.choices,
                 )
-                uchoices = callbacks.user_voice_choices(state.config)
+                uchoices = callbacks.user_voice_choices(cfg)
                 return (
-                    table, msg, new_voice_dd, _model_choices(), status,
+                    table, msg, new_voice_dd, _model_choices(config=cfg), status,
                     gr.Dropdown(choices=uchoices, value=vid),
                     gr.Dropdown(choices=uchoices),
                 )
 
             v_edit_btn.click(
                 fn=_edit_voice,
-                inputs=[v_edit_dd, v_edit_name, v_edit_language, v_edit_description, v_edit_ref_text, model_dd],
+                inputs=[v_edit_dd, v_edit_name, v_edit_language, v_edit_description, v_edit_ref_text, model_dd, session_state],
                 outputs=[v_table, v_edit_status, voice_dd, model_dd, status_box, v_edit_dd, v_del_dd],
             )
 
@@ -520,60 +553,64 @@ def _build_app(state: AppState) -> gr.Blocks:
 
             # -- Model events --
 
-            def _refresh_model_dropdowns(edit_value=None):
+            def _refresh_model_dropdowns(config=None, edit_value=None):
                 """Return updated choices for delete and edit dropdowns."""
-                choices = callbacks.model_choices(state.config)
+                cfg = config or state.config
+                choices = callbacks.model_choices(cfg)
                 return (
                     gr.Dropdown(choices=choices),
                     gr.Dropdown(choices=choices, value=edit_value),
                 )
 
-            def _add_model(mprov, mmodel, miter, macc, mtsim, mname, current_model_id):
+            def _add_model(mprov, mmodel, miter, macc, mtsim, mname, current_model_id, session):
+                cfg = _cfg(session)
                 table, msg = callbacks.add_model(
                     state, mprov, mmodel, miter, macc, mtsim,
-                    custom_name=mname,
+                    custom_name=mname, session=session,
                 )
-                del_dd, edit_dd = _refresh_model_dropdowns()
+                del_dd, edit_dd = _refresh_model_dropdowns(config=cfg)
                 return (
                     table,
                     msg,
-                    _model_choices(),
-                    _voice_choices(current_model_id),
+                    _model_choices(config=cfg),
+                    _voice_choices(current_model_id, config=cfg),
                     del_dd,
                     edit_dd,
                 )
 
             m_add_btn.click(
                 fn=_add_model,
-                inputs=[m_provider, m_model_select, m_max_iter, m_accent, m_text_sim, m_name, model_dd],
+                inputs=[m_provider, m_model_select, m_max_iter, m_accent, m_text_sim, m_name, model_dd, session_state],
                 outputs=[m_table, m_status, model_dd, voice_dd, m_del_dd, m_edit_dd],
             )
 
             # -- Edit model events --
 
-            def _on_edit_model_select(model_id):
-                name, iters, accent, sim = callbacks.load_model_for_edit(state, model_id)
+            def _on_edit_model_select(model_id, session):
+                cfg = _cfg(session)
+                name, iters, accent, sim = callbacks.load_model_for_edit(state, model_id, config=cfg)
                 return name, iters, accent, sim
 
             m_edit_dd.change(
                 fn=_on_edit_model_select,
-                inputs=[m_edit_dd],
+                inputs=[m_edit_dd, session_state],
                 outputs=[m_edit_name, m_edit_iter, m_edit_accent, m_edit_sim],
             )
 
-            def _edit_model(model_id, name, iters, accent, sim, current_model_id):
+            def _edit_model(model_id, name, iters, accent, sim, current_model_id, session):
+                cfg = _cfg(session)
                 table_data, msg = callbacks.edit_model(
-                    state, model_id, name, iters, accent, sim,
+                    state, model_id, name, iters, accent, sim, session=session,
                 )
                 updated_name, updated_iters, updated_accent, updated_sim = (
-                    callbacks.load_model_for_edit(state, model_id)
+                    callbacks.load_model_for_edit(state, model_id, config=cfg)
                 )
-                choices = callbacks.model_choices(state.config)
+                choices = callbacks.model_choices(cfg)
                 return (
                     gr.Dataframe(value=table_data),
                     msg,
-                    _model_choices(),
-                    _voice_choices(current_model_id),
+                    _model_choices(config=cfg),
+                    _voice_choices(current_model_id, config=cfg),
                     gr.Dropdown(choices=choices),
                     gr.Dropdown(choices=choices, value=model_id),
                     updated_name,
@@ -584,7 +621,7 @@ def _build_app(state: AppState) -> gr.Blocks:
 
             m_edit_btn.click(
                 fn=_edit_model,
-                inputs=[m_edit_dd, m_edit_name, m_edit_iter, m_edit_accent, m_edit_sim, model_dd],
+                inputs=[m_edit_dd, m_edit_name, m_edit_iter, m_edit_accent, m_edit_sim, model_dd, session_state],
                 outputs=[
                     m_table, m_edit_status, model_dd, voice_dd,
                     m_del_dd, m_edit_dd,
@@ -594,21 +631,22 @@ def _build_app(state: AppState) -> gr.Blocks:
 
             # -- Delete model events --
 
-            def _del_model(model_id, current_model_id):
-                table, msg = callbacks.delete_model(state, model_id)
-                del_dd, edit_dd = _refresh_model_dropdowns()
+            def _del_model(model_id, current_model_id, session):
+                cfg = _cfg(session)
+                table, msg = callbacks.delete_model(state, model_id, session=session)
+                del_dd, edit_dd = _refresh_model_dropdowns(config=cfg)
                 return (
                     table,
                     msg,
-                    _model_choices(),
-                    _voice_choices(current_model_id),
+                    _model_choices(config=cfg),
+                    _voice_choices(current_model_id, config=cfg),
                     del_dd,
                     edit_dd,
                 )
 
             m_del_btn.click(
                 fn=_del_model,
-                inputs=[m_del_dd, model_dd],
+                inputs=[m_del_dd, model_dd, session_state],
                 outputs=[m_table, m_status, model_dd, voice_dd, m_del_dd, m_edit_dd],
             )
 
@@ -616,6 +654,11 @@ def _build_app(state: AppState) -> gr.Blocks:
 
         with gr.Tab("Training") as training_tab:
             gr.Markdown("## Accent Drift Classifier Training")
+            if multi_user:
+                gr.Markdown(
+                    "> **Training is not available in multi-user mode.** "
+                    "Run rho-tts locally to train classifiers."
+                )
             gr.Markdown(
                 "Train the classifier on labeled `.wav` samples.\n\n"
                 "Dataset must contain two subdirectories:\n"
@@ -626,13 +669,17 @@ def _build_app(state: AppState) -> gr.Blocks:
             t_voice_dd = gr.Dropdown(
                 choices=_train_voice_choices,
                 label="Voice",
-                interactive=True,
+                interactive=not multi_user,
             )
             t_dataset_dir = gr.Textbox(
                 label="Dataset Directory",
                 placeholder="/path/to/dataset",
+                interactive=not multi_user,
             )
-            t_train_btn = gr.Button("Train Classifier", variant="primary")
+            t_train_btn = gr.Button(
+                "Train Classifier", variant="primary",
+                interactive=not multi_user,
+            )
             t_log = gr.Textbox(
                 label="Training Log",
                 lines=12,
@@ -641,6 +688,9 @@ def _build_app(state: AppState) -> gr.Blocks:
             t_status = gr.Textbox(label="", interactive=False, show_label=False)
 
             def _do_train(voice_id, ds):
+                if multi_user:
+                    yield "", "Training is not available in multi-user mode."
+                    return
                 yield from callbacks.train_classifier(state, voice_id, ds)
 
             t_train_btn.click(
@@ -705,16 +755,16 @@ def _build_app(state: AppState) -> gr.Blocks:
 
             # -- Library events --
 
-            def _lib_apply_filters(model_f, voice_f, text_s):
-                return callbacks.library_table(state, model_f, voice_f, text_s)
+            def _lib_apply_filters(model_f, voice_f, text_s, session):
+                return callbacks.library_table(state, model_f, voice_f, text_s, session=session)
 
             lib_filter_btn.click(
                 fn=_lib_apply_filters,
-                inputs=[lib_model_dd, lib_voice_dd, lib_text_search],
+                inputs=[lib_model_dd, lib_voice_dd, lib_text_search, session_state],
                 outputs=[lib_table],
             )
 
-            def _lib_on_select(table_data, evt: gr.SelectData):
+            def _lib_on_select(table_data, session, evt: gr.SelectData):
                 """When a row is clicked, load its audio and transcript."""
                 row_idx = evt.index[0]
                 if hasattr(table_data, "values"):
@@ -724,43 +774,43 @@ def _build_app(state: AppState) -> gr.Blocks:
                 if row_idx < 0 or row_idx >= len(rows):
                     return None, "", None
                 record_id = rows[row_idx][-1]  # ID is last column
-                audio_path, full_text = callbacks.library_get_audio(state, record_id)
+                audio_path, full_text = callbacks.library_get_audio(state, record_id, session=session)
                 return audio_path, full_text, record_id
 
             lib_table.select(
                 fn=_lib_on_select,
-                inputs=[lib_table],
+                inputs=[lib_table, session_state],
                 outputs=[lib_audio, lib_transcript, lib_selected_id],
             )
 
-            def _lib_delete(selected_id, model_f, voice_f, text_s):
+            def _lib_delete(selected_id, model_f, voice_f, text_s, session):
                 if not selected_id:
                     return (
-                        callbacks.library_table(state, model_f, voice_f, text_s),
+                        callbacks.library_table(state, model_f, voice_f, text_s, session=session),
                         "No record selected.",
                         None, None, "",
-                        gr.Dropdown(choices=callbacks.library_model_choices(state)),
-                        gr.Dropdown(choices=callbacks.library_voice_choices(state)),
+                        gr.Dropdown(choices=callbacks.library_model_choices(state, session=session)),
+                        gr.Dropdown(choices=callbacks.library_voice_choices(state, session=session)),
                     )
-                msg = callbacks.library_delete_record(state, selected_id)
+                msg = callbacks.library_delete_record(state, selected_id, session=session)
                 return (
-                    callbacks.library_table(state, model_f, voice_f, text_s),
+                    callbacks.library_table(state, model_f, voice_f, text_s, session=session),
                     msg,
                     None, None, "",
-                    gr.Dropdown(choices=callbacks.library_model_choices(state)),
-                    gr.Dropdown(choices=callbacks.library_voice_choices(state)),
+                    gr.Dropdown(choices=callbacks.library_model_choices(state, session=session)),
+                    gr.Dropdown(choices=callbacks.library_voice_choices(state, session=session)),
                 )
 
             lib_del_btn.click(
                 fn=_lib_delete,
-                inputs=[lib_selected_id, lib_model_dd, lib_voice_dd, lib_text_search],
+                inputs=[lib_selected_id, lib_model_dd, lib_voice_dd, lib_text_search, session_state],
                 outputs=[lib_table, lib_status, lib_selected_id, lib_audio, lib_transcript, lib_model_dd, lib_voice_dd],
             )
 
-            def _lib_clear(model_f, voice_f, text_s):
-                msg = callbacks.library_clear_history(state)
+            def _lib_clear(model_f, voice_f, text_s, session):
+                msg = callbacks.library_clear_history(state, session=session)
                 return (
-                    callbacks.library_table(state, model_f, voice_f, text_s),
+                    callbacks.library_table(state, model_f, voice_f, text_s, session=session),
                     msg,
                     None, None, "",
                     gr.Dropdown(choices=[]),
@@ -769,17 +819,18 @@ def _build_app(state: AppState) -> gr.Blocks:
 
             lib_clear_btn.click(
                 fn=_lib_clear,
-                inputs=[lib_model_dd, lib_voice_dd, lib_text_search],
+                inputs=[lib_model_dd, lib_voice_dd, lib_text_search, session_state],
                 outputs=[lib_table, lib_status, lib_selected_id, lib_audio, lib_transcript, lib_model_dd, lib_voice_dd],
             )
 
-            def _lib_regen(selected_id):
+            def _lib_regen(selected_id, session):
                 if not selected_id:
                     return gr.skip(), gr.skip(), gr.skip(), "No record selected."
-                record = callbacks.library_get_record(state, selected_id)
+                record = callbacks.library_get_record(state, selected_id, session=session)
                 if record is None:
                     return gr.skip(), gr.skip(), gr.skip(), "Record not found."
-                if record.model_id not in state.config.models:
+                cfg = _cfg(session)
+                if record.model_id not in cfg.models:
                     return (
                         gr.skip(), gr.skip(), gr.skip(),
                         f"Model '{record.model_name}' no longer exists.",
@@ -793,18 +844,19 @@ def _build_app(state: AppState) -> gr.Blocks:
 
             lib_regen_btn.click(
                 fn=_lib_regen,
-                inputs=[lib_selected_id],
+                inputs=[lib_selected_id, session_state],
                 outputs=[model_dd, voice_dd, text_input, lib_status],
             )
 
         # ── Tab select: hydrate components from current config ────
 
-        def _on_generate_tab():
-            models = callbacks.model_choices(state.config)
+        def _on_generate_tab(session):
+            cfg = _cfg(session)
+            models = callbacks.model_choices(cfg)
             initial_model_id = models[0][1] if models else None
-            voices = callbacks.voice_choices_for_model(state.config, initial_model_id)
+            voices = callbacks.voice_choices_for_model(cfg, initial_model_id)
             status = callbacks.status_for_model_voice(
-                state.config, initial_model_id, voices,
+                cfg, initial_model_id, voices,
             )
             return (
                 gr.Dropdown(choices=models, value=initial_model_id),
@@ -814,41 +866,50 @@ def _build_app(state: AppState) -> gr.Blocks:
 
         generate_tab.select(
             fn=_on_generate_tab,
+            inputs=[session_state],
             outputs=[model_dd, voice_dd, status_box],
         )
 
-        def _on_voices_tab():
-            uchoices = callbacks.user_voice_choices(state.config)
+        def _on_voices_tab(session):
+            cfg = _cfg(session)
+            uchoices = callbacks.user_voice_choices(cfg)
             return (
-                callbacks._voices_table(state.config),
+                callbacks._voices_table(cfg),
                 gr.Dropdown(choices=uchoices),
                 gr.Dropdown(choices=uchoices),
             )
 
-        voices_tab.select(fn=_on_voices_tab, outputs=[v_table, v_del_dd, v_edit_dd])
+        voices_tab.select(
+            fn=_on_voices_tab,
+            inputs=[session_state],
+            outputs=[v_table, v_del_dd, v_edit_dd],
+        )
 
-        def _on_models_tab():
-            choices = callbacks.model_choices(state.config)
+        def _on_models_tab(session):
+            cfg = _cfg(session)
+            choices = callbacks.model_choices(cfg)
             return (
-                callbacks._models_table(state.config),
+                callbacks._models_table(cfg),
                 gr.Dropdown(choices=choices),
                 gr.Dropdown(choices=choices),
             )
 
         models_tab.select(
             fn=_on_models_tab,
+            inputs=[session_state],
             outputs=[m_table, m_del_dd, m_edit_dd],
         )
 
-        def _on_library_tab():
+        def _on_library_tab(session):
             return (
-                callbacks.library_table(state),
-                gr.Dropdown(choices=callbacks.library_model_choices(state)),
-                gr.Dropdown(choices=callbacks.library_voice_choices(state)),
+                callbacks.library_table(state, session=session),
+                gr.Dropdown(choices=callbacks.library_model_choices(state, session=session)),
+                gr.Dropdown(choices=callbacks.library_voice_choices(state, session=session)),
             )
 
         library_tab.select(
             fn=_on_library_tab,
+            inputs=[session_state],
             outputs=[lib_table, lib_model_dd, lib_voice_dd],
         )
 
@@ -880,12 +941,18 @@ def launch_ui(
     if args.device:
         config.device = args.device
 
-    state = AppState(config=config, config_path=args.config)
+    multi_user = os.environ.get("SPACE_ID") is not None
+    state = AppState(config=config, config_path=args.config, multi_user=multi_user)
 
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
 
-    app = _build_app(state)
+    if multi_user:
+        import torch
+        config.device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info("Multi-user mode enabled (SPACE_ID detected), device: %s", config.device)
+
+    app = _build_app(state, multi_user=multi_user)
     app.launch(server_name=args.host, server_port=args.port, share=args.share, theme=gr.themes.Soft())

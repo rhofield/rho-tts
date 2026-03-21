@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.7] - 2026-03-21
+
+### Added
+- Per-session isolation for multi-user deployments (e.g. HF Spaces)
+  - New `SessionContext` dataclass gives each browser tab its own cancellation token, generation history, and temp output directory
+  - Voices, Models, and Library tabs all operate on session-scoped state
+  - Temp directories are cleaned up automatically on session close
+- Training tab is now visible (but disabled) in multi-user mode with an explanatory message
+- Server-side guard on training callback to block API-level bypass in multi-user mode
+- Test suite for session lifecycle (`tests/test_session.py`)
+
+### Changed
+- `AppState` accepts `multi_user` flag; config saves are no-ops in multi-user mode
+- `AppState.get_or_create_tts()` accepts an optional per-session `config` override
+- Callbacks refactored to accept session context for isolated state
+- Version bump to 1.0.7
+
 ## [1.0.6] - 2026-03-19
 
 ### Added

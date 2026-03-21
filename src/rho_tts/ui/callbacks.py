@@ -29,6 +29,7 @@ from .config import (
     get_provider_model_defaults,
     is_model_cached,
 )
+from .session import SessionContext
 from .state import AppState
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,7 @@ def generate_audio(
     speed: float = 1.0,
     pitch_semitones: float = 0.0,
     format: str = "wav",
+    session: Optional[SessionContext] = None,
 ):
     """
     Generator that runs TTS generation, yielding progress updates.
@@ -76,10 +78,11 @@ def generate_audio(
         yield None, "Please enter text to generate."
         return
 
-    model_cfg = state.config.models.get(model_id)
+    cfg = session.config if session else state.config
+    model_cfg = cfg.models.get(model_id)
     voice_cfg: Optional[VoiceProfile] = None
     if voice_id:
-        voice_cfg = get_builtin_voice(voice_id) or state.config.voices.get(voice_id)
+        voice_cfg = get_builtin_voice(voice_id) or cfg.voices.get(voice_id)
 
     if model_cfg is None:
         yield None, f"Model '{model_id}' not found in config."
@@ -111,18 +114,19 @@ def generate_audio(
         return
 
     try:
-        tts = state.get_or_create_tts(model_cfg, voice_cfg)
+        tts = state.get_or_create_tts(model_cfg, voice_cfg, config=cfg)
     except Exception as e:
         yield None, f"Failed to initialize TTS: {e}"
         return
 
-    token = state.new_cancellation_token()
+    token = session.new_cancellation_token() if session else state.new_cancellation_token()
 
-    os.makedirs(state.config.output_dir, exist_ok=True)
+    out_dir = session.output_dir if session else state.config.output_dir
+    os.makedirs(out_dir, exist_ok=True)
     timestamp = int(time.time())
     voice_label = voice_id or "default"
     output_path = os.path.join(
-        state.config.output_dir, f"gen_{voice_label}_{timestamp}.{format}",
+        out_dir, f"gen_{voice_label}_{timestamp}.{format}",
     )
 
     yield None, "Starting generation..."
@@ -189,7 +193,10 @@ def generate_audio(
                 duration_sec=duration,
                 format=format,
             )
-            state.add_generation_record(record)
+            if session:
+                session.add_generation_record(record)
+            else:
+                state.add_generation_record(record)
 
             # Build status with validation scores
             status = f"Generated: {os.path.basename(result_path)}"
@@ -211,9 +218,12 @@ def generate_audio(
             return
 
 
-def cancel_generation(state: AppState) -> str:
+def cancel_generation(state: AppState, session: Optional[SessionContext] = None) -> str:
     """Cancel the currently running generation."""
-    state.cancel_generation()
+    if session:
+        session.cancel_generation()
+    else:
+        state.cancel_generation()
     return "Cancelling..."
 
 
@@ -235,6 +245,7 @@ def load_model_voice_params(
     state: AppState,
     voice_id: Optional[str],
     model_id: Optional[str],
+    config: Optional[AppConfig] = None,
 ) -> tuple:
     """
     Load per-voice+model parameter overrides.
@@ -243,6 +254,8 @@ def load_model_voice_params(
         (seed, max_iterations, accent_drift_threshold, text_similarity_threshold,
          temperature, cfg_weight, label, is_chatterbox)
     """
+    cfg = config or state.config
+
     if not voice_id or not model_id:
         return (
             PARAM_DEFAULTS["seed"],
@@ -255,7 +268,7 @@ def load_model_voice_params(
             False,
         )
 
-    model_cfg = state.config.models.get(model_id)
+    model_cfg = cfg.models.get(model_id)
     if model_cfg is None:
         return (
             PARAM_DEFAULTS["seed"],
@@ -272,7 +285,7 @@ def load_model_voice_params(
 
     # Fall back chain: saved overrides → model params → provider defaults
     key = get_phonetic_key(voice_id, model_id)
-    saved = state.config.model_voice_params.get(key, {})
+    saved = cfg.model_voice_params.get(key, {})
 
     def _get(param: str):
         if param in saved:
@@ -286,10 +299,10 @@ def load_model_voice_params(
     builtin = get_builtin_voice(voice_id)
     if builtin:
         voice_name = builtin.name
-    elif voice_id in state.config.voices:
-        voice_name = state.config.voices[voice_id].name
-    if model_id in state.config.models:
-        model_name = state.config.models[model_id].name
+    elif voice_id in cfg.voices:
+        voice_name = cfg.voices[voice_id].name
+    if model_id in cfg.models:
+        model_name = cfg.models[model_id].name
 
     label = f"Parameters for: {voice_name} + {model_name}"
     return (
@@ -314,16 +327,20 @@ def save_model_voice_params(
     text_similarity_threshold: Optional[float],
     temperature: Optional[float],
     cfg_weight: Optional[float],
+    session: Optional[SessionContext] = None,
 ) -> str:
     """Save per-voice+model parameter overrides to config."""
     if not voice_id or not model_id:
         return "Select a voice and model first."
 
+    ctx = session or state
+    cfg = ctx.config
+
     def _val(key, cast, raw):
         return cast(raw) if raw is not None else PARAM_DEFAULTS[key]
 
     key = get_phonetic_key(voice_id, model_id)
-    state.config.model_voice_params[key] = {
+    cfg.model_voice_params[key] = {
         "seed":                     _val("seed", int, seed),
         "max_iterations":           _val("max_iterations", int, max_iterations),
         "accent_drift_threshold":   _val("accent_drift_threshold", float, accent_drift_threshold),
@@ -331,7 +348,7 @@ def save_model_voice_params(
         "temperature":              _val("temperature", float, temperature),
         "cfg_weight":               _val("cfg_weight", float, cfg_weight),
     }
-    state.save()
+    ctx.save()
     state.invalidate_tts()
     return "Parameters saved."
 
@@ -344,6 +361,7 @@ def load_phonetic_mapping(
     state: AppState,
     voice_id: str,
     model_id: str,
+    config: Optional[AppConfig] = None,
 ) -> tuple[list[list[str]], str]:
     """
     Load phonetic mappings for a voice+model pair.
@@ -351,19 +369,21 @@ def load_phonetic_mapping(
     Returns:
         (rows_for_dataframe, label_string)
     """
+    cfg = config or state.config
+
     if not voice_id or not model_id:
         return [], ""
 
     key = get_phonetic_key(voice_id, model_id)
-    mapping = state.config.phonetic_mappings.get(key, {})
+    mapping = cfg.phonetic_mappings.get(key, {})
     rows = [[word, pron] for word, pron in mapping.items()]
 
     voice_name = voice_id
     model_name = model_id
-    if voice_id in state.config.voices:
-        voice_name = state.config.voices[voice_id].name
-    if model_id in state.config.models:
-        model_name = state.config.models[model_id].name
+    if voice_id in cfg.voices:
+        voice_name = cfg.voices[voice_id].name
+    if model_id in cfg.models:
+        model_name = cfg.models[model_id].name
 
     label = f"Mappings for: {voice_name} + {model_name}"
     return rows, label
@@ -374,10 +394,14 @@ def save_phonetic_mapping(
     voice_id: str,
     model_id: str,
     dataframe_data: list[list[str]],
+    session: Optional[SessionContext] = None,
 ) -> str:
     """Save edited phonetic mappings back to config and persist to disk."""
     if not voice_id or not model_id:
         return "Select a voice and model first."
+
+    ctx = session or state
+    cfg = ctx.config
 
     key = get_phonetic_key(voice_id, model_id)
     mapping = {}
@@ -385,8 +409,8 @@ def save_phonetic_mapping(
         if len(row) >= 2 and row[0] and row[0].strip():
             mapping[row[0].strip()] = row[1].strip() if row[1] else ""
 
-    state.config.phonetic_mappings[key] = mapping
-    state.save()
+    cfg.phonetic_mappings[key] = mapping
+    ctx.save()
 
     # Invalidate cached TTS so next generation picks up new mappings
     state.invalidate_tts()
@@ -405,6 +429,7 @@ def add_voice(
     reference_text: str,
     language: str = "English",
     description: Optional[str] = None,
+    session: Optional[SessionContext] = None,
 ) -> tuple[list[list[str]], str]:
     """
     Add or update a voice profile.
@@ -412,19 +437,23 @@ def add_voice(
     Returns:
         (updated_voices_table, status_message)
     """
+    ctx = session or state
+    cfg = ctx.config
+
     if not display_name or not display_name.strip():
-        return _voices_table(state.config), "Display name is required."
+        return _voices_table(cfg), "Display name is required."
     if not audio_path:
-        return _voices_table(state.config), "Reference audio is required."
+        return _voices_table(cfg), "Reference audio is required."
 
     voice_id = uuid.uuid4().hex[:12]
     display_name = display_name.strip()
 
-    # Copy audio into managed directory
+    # Copy audio into managed directory (session temp dir in multi-user mode)
+    dest_dir = session.output_dir if session else None
     try:
-        managed_path = copy_voice_audio(audio_path, voice_id)
+        managed_path = copy_voice_audio(audio_path, voice_id, dest_dir=dest_dir)
     except Exception as e:
-        return _voices_table(state.config), f"Failed to copy audio: {e}"
+        return _voices_table(cfg), f"Failed to copy audio: {e}"
 
     profile = VoiceProfile(
         id=voice_id,
@@ -434,33 +463,38 @@ def add_voice(
         language=language,
         description=description.strip() if description else None,
     )
-    state.config.voices[voice_id] = profile
-    state.save()
+    cfg.voices[voice_id] = profile
+    ctx.save()
     state.invalidate_tts()
 
-    return _voices_table(state.config), f"Voice '{display_name}' saved."
+    return _voices_table(cfg), f"Voice '{display_name}' saved."
 
 
-def delete_voice(state: AppState, voice_id: str) -> tuple[list[list[str]], str]:
+def delete_voice(
+    state: AppState, voice_id: str, session: Optional[SessionContext] = None,
+) -> tuple[list[list[str]], str]:
     """Delete a voice profile by ID."""
-    if not voice_id or voice_id not in state.config.voices:
-        return _voices_table(state.config), "Select a voice to delete."
+    ctx = session or state
+    cfg = ctx.config
 
-    profile = state.config.voices.pop(voice_id)
+    if not voice_id or voice_id not in cfg.voices:
+        return _voices_table(cfg), "Select a voice to delete."
+
+    profile = cfg.voices.pop(voice_id)
 
     # Remove associated phonetic mappings
-    keys_to_remove = [k for k in state.config.phonetic_mappings if k.startswith(f"{voice_id}::")]
+    keys_to_remove = [k for k in cfg.phonetic_mappings if k.startswith(f"{voice_id}::")]
     for k in keys_to_remove:
-        del state.config.phonetic_mappings[k]
+        del cfg.phonetic_mappings[k]
 
     # Remove associated voice+model params
-    keys_to_remove = [k for k in state.config.model_voice_params if k.startswith(f"{voice_id}::")]
+    keys_to_remove = [k for k in cfg.model_voice_params if k.startswith(f"{voice_id}::")]
     for k in keys_to_remove:
-        del state.config.model_voice_params[k]
+        del cfg.model_voice_params[k]
 
-    state.save()
+    ctx.save()
     state.invalidate_tts()
-    return _voices_table(state.config), f"Deleted voice '{profile.name}'."
+    return _voices_table(cfg), f"Deleted voice '{profile.name}'."
 
 
 def _voices_table(config: AppConfig) -> list[list[str]]:
@@ -473,16 +507,19 @@ def _voices_table(config: AppConfig) -> list[list[str]]:
 
 def load_voice_for_edit(
     state: AppState, voice_id: str,
+    config: Optional[AppConfig] = None,
 ) -> tuple[str, str, str, str]:
     """Load a saved voice's current values into the edit form.
 
     Returns:
         (name, language, description, reference_text)
     """
-    if not voice_id or voice_id not in state.config.voices:
+    cfg = config or state.config
+
+    if not voice_id or voice_id not in cfg.voices:
         return "", "English", "", ""
 
-    v = state.config.voices[voice_id]
+    v = cfg.voices[voice_id]
     return v.name, v.language, v.description or "", v.reference_text or ""
 
 
@@ -493,16 +530,20 @@ def edit_voice(
     language: str,
     description: Optional[str],
     reference_text: Optional[str],
+    session: Optional[SessionContext] = None,
 ) -> tuple[list[list[str]], str]:
     """Update an existing voice profile.
 
     Returns:
         (updated_voices_table, status_message)
     """
-    if not voice_id or voice_id not in state.config.voices:
-        return _voices_table(state.config), "Select a voice to edit."
+    ctx = session or state
+    cfg = ctx.config
 
-    v = state.config.voices[voice_id]
+    if not voice_id or voice_id not in cfg.voices:
+        return _voices_table(cfg), "Select a voice to edit."
+
+    v = cfg.voices[voice_id]
 
     if new_name and new_name.strip():
         v.name = new_name.strip()
@@ -511,10 +552,10 @@ def edit_voice(
     v.description = description.strip() if description and description.strip() else None
     v.reference_text = reference_text.strip() if reference_text and reference_text.strip() else None
 
-    state.save()
+    ctx.save()
     state.invalidate_tts()
 
-    return _voices_table(state.config), f"Voice '{v.name}' updated."
+    return _voices_table(cfg), f"Voice '{v.name}' updated."
 
 
 # ---------------------------------------------------------------------------
@@ -529,6 +570,7 @@ def add_model(
     accent_drift_threshold: Optional[float],
     text_similarity_threshold: Optional[float],
     custom_name: Optional[str] = None,
+    session: Optional[SessionContext] = None,
 ) -> tuple[list[list[str]], str]:
     """
     Add a model configuration from the provider catalog.
@@ -539,10 +581,13 @@ def add_model(
     Returns:
         (updated_models_table, status_message)
     """
+    ctx = session or state
+    cfg = ctx.config
+
     if not provider:
-        return _models_table(state.config), "Please select a provider."
+        return _models_table(cfg), "Please select a provider."
     if not model_name:
-        return _models_table(state.config), "Please select a model."
+        return _models_table(cfg), "Please select a model."
 
     # Start from catalog defaults, then override thresholds
     params = get_provider_model_defaults(provider, model_name)
@@ -550,10 +595,10 @@ def add_model(
     # Identity-based duplicate check: compare model_path (Qwen) or implementation (Chatterbox)
     identity_key = params.get("model_path") or params.get("implementation")
     if identity_key:
-        for existing in state.config.models.values():
+        for existing in cfg.models.values():
             existing_identity = existing.params.get("model_path") or existing.params.get("implementation")
             if existing.provider == provider and existing_identity == identity_key:
-                return _models_table(state.config), f"This model is already added as '{existing.name}'."
+                return _models_table(cfg), f"This model is already added as '{existing.name}'."
 
     if max_iterations is not None and max_iterations > 0:
         params["max_iterations"] = int(max_iterations)
@@ -571,37 +616,43 @@ def add_model(
         provider=provider,
         params=params,
     )
-    state.config.models[model_id] = model_cfg
-    state.save()
+    cfg.models[model_id] = model_cfg
+    ctx.save()
     state.invalidate_tts()
 
-    return _models_table(state.config), f"Model '{display_name}' added."
+    return _models_table(cfg), f"Model '{display_name}' added."
 
 
-def delete_model(state: AppState, model_id: str) -> tuple[list[list[str]], str]:
+def delete_model(
+    state: AppState, model_id: str, session: Optional[SessionContext] = None,
+) -> tuple[list[list[str]], str]:
     """Delete a model config by ID."""
-    if not model_id or model_id not in state.config.models:
-        return _models_table(state.config), "Select a model to delete."
+    ctx = session or state
+    cfg = ctx.config
 
-    model_cfg = state.config.models.pop(model_id)
+    if not model_id or model_id not in cfg.models:
+        return _models_table(cfg), "Select a model to delete."
+
+    model_cfg = cfg.models.pop(model_id)
 
     # Remove associated phonetic mappings
-    keys_to_remove = [k for k in state.config.phonetic_mappings if k.endswith(f"::{model_id}")]
+    keys_to_remove = [k for k in cfg.phonetic_mappings if k.endswith(f"::{model_id}")]
     for k in keys_to_remove:
-        del state.config.phonetic_mappings[k]
+        del cfg.phonetic_mappings[k]
 
     # Remove associated voice+model params
-    keys_to_remove = [k for k in state.config.model_voice_params if k.endswith(f"::{model_id}")]
+    keys_to_remove = [k for k in cfg.model_voice_params if k.endswith(f"::{model_id}")]
     for k in keys_to_remove:
-        del state.config.model_voice_params[k]
+        del cfg.model_voice_params[k]
 
-    state.save()
+    ctx.save()
     state.invalidate_tts()
-    return _models_table(state.config), f"Deleted model '{model_cfg.name}'."
+    return _models_table(cfg), f"Deleted model '{model_cfg.name}'."
 
 
 def load_model_for_edit(
     state: AppState, model_id: str,
+    config: Optional[AppConfig] = None,
 ) -> tuple[str, int, float, float]:
     """
     Load a saved model's current values into the edit form.
@@ -609,15 +660,17 @@ def load_model_for_edit(
     Returns:
         (name, max_iterations, accent_drift_threshold, text_similarity_threshold)
     """
-    if not model_id or model_id not in state.config.models:
+    cfg = config or state.config
+
+    if not model_id or model_id not in cfg.models:
         return "", 10, 0.17, 0.85
 
-    cfg = state.config.models[model_id]
+    model_cfg = cfg.models[model_id]
     return (
-        cfg.name,
-        cfg.params.get("max_iterations", 10),
-        cfg.params.get("accent_drift_threshold", 0.17),
-        cfg.params.get("text_similarity_threshold", 0.85),
+        model_cfg.name,
+        model_cfg.params.get("max_iterations", 10),
+        model_cfg.params.get("accent_drift_threshold", 0.17),
+        model_cfg.params.get("text_similarity_threshold", 0.85),
     )
 
 
@@ -628,6 +681,7 @@ def edit_model(
     max_iterations: Optional[int],
     accent_drift_threshold: Optional[float],
     text_similarity_threshold: Optional[float],
+    session: Optional[SessionContext] = None,
 ) -> tuple[list[list[str]], str]:
     """
     Update an existing saved model's name and parameters.
@@ -635,25 +689,28 @@ def edit_model(
     Returns:
         (updated_models_table, status_message)
     """
-    if not model_id or model_id not in state.config.models:
-        return _models_table(state.config), "Select a model to edit."
+    ctx = session or state
+    cfg = ctx.config
 
-    cfg = state.config.models[model_id]
+    if not model_id or model_id not in cfg.models:
+        return _models_table(cfg), "Select a model to edit."
+
+    model_cfg = cfg.models[model_id]
 
     if new_name and new_name.strip():
-        cfg.name = new_name.strip()
+        model_cfg.name = new_name.strip()
 
     if max_iterations is not None and max_iterations > 0:
-        cfg.params["max_iterations"] = int(max_iterations)
+        model_cfg.params["max_iterations"] = int(max_iterations)
     if accent_drift_threshold is not None:
-        cfg.params["accent_drift_threshold"] = float(accent_drift_threshold)
+        model_cfg.params["accent_drift_threshold"] = float(accent_drift_threshold)
     if text_similarity_threshold is not None:
-        cfg.params["text_similarity_threshold"] = float(text_similarity_threshold)
+        model_cfg.params["text_similarity_threshold"] = float(text_similarity_threshold)
 
-    state.save()
+    ctx.save()
     state.invalidate_tts()
 
-    return _models_table(state.config), f"Model '{cfg.name}' updated."
+    return _models_table(cfg), f"Model '{model_cfg.name}' updated."
 
 
 def download_model(provider: str, model_name: str) -> tuple[str, dict]:
@@ -793,12 +850,13 @@ def library_table(
     model_filter: Optional[str] = None,
     voice_filter: Optional[str] = None,
     text_search: Optional[str] = None,
+    session: Optional[SessionContext] = None,
 ) -> list[list]:
     """Build filtered library table rows, sorted newest-first.
 
     Each row: [Timestamp, Model, Voice, Text (truncated), Duration, Status, ID (hidden)]
     """
-    records = state.history
+    records = session.history if session else state.history
     if model_filter:
         records = [r for r in records if r.model_name == model_filter]
     if voice_filter:
@@ -819,23 +877,31 @@ def library_table(
     return rows
 
 
-def library_model_choices(state: AppState) -> list[str]:
+def library_model_choices(
+    state: AppState, session: Optional[SessionContext] = None,
+) -> list[str]:
     """Return distinct model names from history for the filter dropdown."""
-    names = sorted({r.model_name for r in state.history})
+    records = session.history if session else state.history
+    names = sorted({r.model_name for r in records})
     return names
 
 
-def library_voice_choices(state: AppState) -> list[str]:
+def library_voice_choices(
+    state: AppState, session: Optional[SessionContext] = None,
+) -> list[str]:
     """Return distinct voice names from history for the filter dropdown."""
-    names = sorted({r.voice_name for r in state.history if r.voice_name})
+    records = session.history if session else state.history
+    names = sorted({r.voice_name for r in records if r.voice_name})
     return names
 
 
 def library_get_audio(
     state: AppState, record_id: str,
+    session: Optional[SessionContext] = None,
 ) -> tuple[Optional[str], str]:
     """Look up a record by ID and return (audio_path_or_None, full_text)."""
-    for r in state.history:
+    records = session.history if session else state.history
+    for r in records:
         if r.id == record_id:
             path = r.audio_path if os.path.exists(r.audio_path) else None
             return path, r.text
@@ -844,9 +910,11 @@ def library_get_audio(
 
 def library_get_record(
     state: AppState, record_id: str,
+    session: Optional[SessionContext] = None,
 ) -> Optional[GenerationRecord]:
     """Look up a full GenerationRecord by ID."""
-    for r in state.history:
+    records = session.history if session else state.history
+    for r in records:
         if r.id == record_id:
             return r
     return None
@@ -854,16 +922,23 @@ def library_get_record(
 
 def library_delete_record(
     state: AppState, record_id: str,
+    session: Optional[SessionContext] = None,
 ) -> str:
     """Delete a single library record (audio file is left untouched)."""
+    if session:
+        if session.delete_generation_record(record_id):
+            return "Record deleted."
+        return "Record not found."
     if state.delete_generation_record(record_id):
         return "Record deleted."
     return "Record not found."
 
 
-def library_clear_history(state: AppState) -> str:
+def library_clear_history(
+    state: AppState, session: Optional[SessionContext] = None,
+) -> str:
     """Clear all library history."""
-    count = state.clear_history()
+    count = session.clear_history() if session else state.clear_history()
     return f"Cleared {count} record(s)."
 
 

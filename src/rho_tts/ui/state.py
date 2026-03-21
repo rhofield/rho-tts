@@ -42,9 +42,15 @@ class AppState:
     and cached by voice+model), and the current cancellation token.
     """
 
-    def __init__(self, config: Optional[AppConfig] = None, config_path: Optional[str] = None):
+    def __init__(
+        self,
+        config: Optional[AppConfig] = None,
+        config_path: Optional[str] = None,
+        multi_user: bool = False,
+    ):
         self.config = config or load_config(config_path)
         self._config_path = config_path
+        self.multi_user = multi_user
         self._active_tts: Optional[BaseTTS] = None
         self._cache_key: Optional[tuple] = None  # (voice_id, model_id)
         self._lock = threading.Lock()
@@ -52,19 +58,27 @@ class AppState:
         self._history: Optional[list] = None  # lazy-loaded
 
     def save(self) -> None:
+        if self.multi_user:
+            return  # config is read-only in multi-user mode
         save_config(self.config, self._config_path)
 
     def get_or_create_tts(
         self,
         model_config: ModelConfig,
         voice_profile: Optional[VoiceProfile] = None,
+        config: Optional[AppConfig] = None,
     ) -> BaseTTS:
         """
         Return a cached TTS instance, or create a new one if the
         voice/model combination has changed.
 
+        When *config* is provided (e.g. a session's config), device,
+        model_voice_params, and phonetic_mappings are read from it
+        instead of the shared ``self.config``.
+
         When *voice_profile* is ``None`` the provider's default voice is used.
         """
+        cfg = config or self.config
         voice_id = voice_profile.id if voice_profile else None
         new_key = (voice_id, model_config.id)
 
@@ -84,7 +98,7 @@ class AppState:
 
             # Build kwargs for TTSFactory
             kwargs = {
-                "device": self.config.device,
+                "device": cfg.device,
                 **model_config.params,
             }
 
@@ -93,7 +107,7 @@ class AppState:
             # passing unknown kwargs to constructors that don't accept them.
             if voice_profile:
                 params_key = get_phonetic_key(voice_profile.id, model_config.id)
-                voice_model_params = self.config.model_voice_params.get(params_key, {})
+                voice_model_params = cfg.model_voice_params.get(params_key, {})
                 if voice_model_params:
                     _CHATTERBOX_ONLY = {"temperature", "cfg_weight"}
                     filtered = {
@@ -104,7 +118,7 @@ class AppState:
 
             if voice_profile:
                 phonetic_key = get_phonetic_key(voice_profile.id, model_config.id)
-                phonetic_mapping = self.config.phonetic_mappings.get(phonetic_key, {})
+                phonetic_mapping = cfg.phonetic_mappings.get(phonetic_key, {})
 
                 if voice_profile.reference_audio:
                     kwargs["reference_audio"] = voice_profile.reference_audio

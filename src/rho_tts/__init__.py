@@ -25,7 +25,7 @@ Context manager:
         result = tts.generate("Hello world!", "output.wav")
 """
 
-__version__ = "1.0.6"
+__version__ = "1.0.7"
 
 from .base_tts import BaseTTS
 from .cancellation import CancellationToken, CancelledException
