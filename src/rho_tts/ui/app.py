@@ -955,4 +955,5 @@ def launch_ui(
         logger.info("Multi-user mode enabled (SPACE_ID detected), device: %s", config.device)
 
     app = _build_app(state, multi_user=multi_user)
-    app.launch(server_name=args.host, server_port=args.port, share=args.share, theme=gr.themes.Soft())
+    server_name = os.environ.get("GRADIO_SERVER_NAME", args.host)
+    app.launch(server_name=server_name, server_port=args.port, share=args.share, theme=gr.themes.Soft())

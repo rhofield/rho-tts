@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rho-tts"
-version = "1.0.7"
+version = "1.0.8"
 description = "Multi-provider text-to-speech library with voice cloning, accent drift detection, and STT validation"
 readme = "README.md"
 license = "MIT"
@@ -49,7 +49,8 @@ validation = [
     "joblib",
     "librosa>=0.10",
     "num2words",
-    "word2number",
+    "nemo_text_processing",
+    "text2num",
     "setuptools<82",
 ]
 ui = [

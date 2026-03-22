@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.8] - 2026-03-22
+
+### Changed
+- Replaced custom 268-line number normalizer with a production-grade pipeline backed by `nemo_text_processing` and `text2num`
+  - NeMo's inverse text normalization (ITN) handles dates (`"march twenty second twenty twenty six"` → `"march 22 2026"`), currency (`"five dollars and ninety nine cents"` → `"$5.99"`), and times (`"three thirty pm"` → `"03:30 p.m."`) in addition to numbers
+  - `text2num` (`alpha2digit`) covers remaining single and compound word numbers NeMo doesn't handle standalone
+  - Mixed digit-word formats (`"2 hundred"` → `"200"`) handled by a retained regex pre-pass
+  - Removed `word2number` dependency; added `nemo_text_processing` and `text2num` to `validation` extra
+- Version bump to 1.0.8
+
 ## [1.0.7] - 2026-03-21
 
 ### Added

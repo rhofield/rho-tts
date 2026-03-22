@@ -157,7 +157,7 @@ When validation deps are installed (`pip install rho-tts[validation]`), generate
 
 1. **Accent drift detection** — A trained classifier predicts the probability that the voice has drifted from the target accent. Samples exceeding the threshold are regenerated.
 
-2. **STT text matching** — Whisper transcribes the audio and compares it against the intended text using fuzzy matching with number normalization.
+2. **STT text matching** — Whisper transcribes the audio and compares it against the intended text using fuzzy matching with number normalization. The normalizer handles word numbers, ordinals, dates, currency, and times (e.g. `"five dollars and ninety nine cents"` → `"$5.99"`, `"march twenty second"` → `"march 22"`) via NeMo inverse text normalization.
 
 3. **Speaker similarity** — Cosine similarity between the generated audio's speaker embedding and the reference voice embedding.
 

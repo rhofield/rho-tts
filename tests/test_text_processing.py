@@ -107,10 +107,7 @@ class TestNumberNormalization:
         assert "3" in normalize_numbers_to_digits("3rd")
 
     def test_word_to_digit(self):
-        from rho_tts.validation.stt.number_normalizer import normalize_numbers_to_digits, w2n
-
-        if w2n is None:
-            pytest.skip("word2number not installed")
+        from rho_tts.validation.stt.number_normalizer import normalize_numbers_to_digits
 
         result = normalize_numbers_to_digits("two hundred")
         assert "200" in result
