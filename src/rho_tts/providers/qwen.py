@@ -126,6 +126,8 @@ class QwenTTS(BaseTTS):
             except Exception:
                 pass
 
+        return self.qwen3_model
+
     def _try_load_model(self, model_cls, model_path: str):
         """Try loading the model with attention fallback and CUDA fallback.
 
