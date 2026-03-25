@@ -808,11 +808,11 @@ def voice_choices_for_model(
     model).
     """
     if not model_id:
-        return voice_choices(config)
+        return []
 
     model_cfg = config.models.get(model_id)
     if model_cfg is None:
-        return voice_choices(config)
+        return []
 
     provider = model_cfg.provider
     is_custom = provider == "qwen" and _is_custom_voice_model(model_cfg)

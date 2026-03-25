@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.9] - 2026-03-25
+
+### Fixed
+- Chatterbox "Faster" model no longer crashes when the installed `chatterbox-tts` version doesn't support `max_cache_len` — unsupported kwargs are detected via signature inspection and dropped with a warning
+- Voice dropdown no longer retains stale values after switching models, preventing Gradio validation errors (`Value not in the list of choices`)
+- Adding, editing, or deleting a model now correctly syncs the voice dropdown with the auto-selected model instead of leaving it empty
+- Models tab now pre-populates model choices for the default provider on initial load
+
+### Changed
+- Qwen model display names clarified: "Base (Voice Cloning)" and "CustomVoice (Built-in Speakers)"
+- Voice dropdown returns empty when no model is selected, instead of showing all built-in voices across providers
+- Version bump to 1.0.9
+
 ## [1.0.8] - 2026-03-22
 
 ### Changed

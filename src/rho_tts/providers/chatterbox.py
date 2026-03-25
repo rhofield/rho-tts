@@ -6,6 +6,7 @@ including accent drift checking and STT validation.
 Supports both default voice and voice cloning via reference audio.
 """
 import copy
+import inspect
 import logging
 from typing import Dict, List, Optional, Union
 
@@ -126,6 +127,16 @@ class ChatterboxTTS(BaseTTS):
             gen_kwargs.setdefault('max_new_tokens', 1000)
 
         gen_kwargs.update(kwargs)
+
+        # Filter out kwargs not accepted by the upstream generate() method.
+        # Some chatterbox-tts versions lack parameters like max_cache_len.
+        sig = inspect.signature(self.model.generate)
+        if not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+            unsupported = set(gen_kwargs) - set(sig.parameters)
+            if unsupported:
+                logger.warning("Dropping unsupported generate() kwargs: %s", unsupported)
+                for k in unsupported:
+                    del gen_kwargs[k]
 
         return self.model.generate(text, audio_prompt_path=audio_prompt_path, **gen_kwargs)
 

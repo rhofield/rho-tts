@@ -28,7 +28,7 @@ DEFAULT_VOICES_DIR = os.path.join(DEFAULT_CONFIG_DIR, "voices")
 PROVIDER_MODELS: dict[str, list[dict]] = {
     "qwen": [
         {
-            "display_name": "Qwen3-TTS 1.7B Base",
+            "display_name": "Qwen3-TTS 1.7B Base (Voice Cloning)",
             "defaults": {
                 "model_path": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
                 "max_iterations": 10,
@@ -37,7 +37,7 @@ PROVIDER_MODELS: dict[str, list[dict]] = {
             },
         },
         {
-            "display_name": "Qwen3-TTS 0.6B Base",
+            "display_name": "Qwen3-TTS 0.6B Base (Voice Cloning)",
             "defaults": {
                 "model_path": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
                 "max_iterations": 10,
@@ -46,7 +46,7 @@ PROVIDER_MODELS: dict[str, list[dict]] = {
             },
         },
         {
-            "display_name": "Qwen3-TTS 1.7B CustomVoice",
+            "display_name": "Qwen3-TTS 1.7B CustomVoice (Built-in Speakers)",
             "defaults": {
                 "model_path": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
                 "max_iterations": 10,
@@ -55,7 +55,7 @@ PROVIDER_MODELS: dict[str, list[dict]] = {
             },
         },
         {
-            "display_name": "Qwen3-TTS 0.6B CustomVoice",
+            "display_name": "Qwen3-TTS 0.6B CustomVoice (Built-in Speakers)",
             "defaults": {
                 "model_path": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
                 "max_iterations": 10,

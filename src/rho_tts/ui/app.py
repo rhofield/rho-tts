@@ -51,13 +51,16 @@ def _build_app(state: AppState, multi_user: bool = False) -> gr.Blocks:
 
         def _voice_choices(model_id=None, config=None):
             cfg = config or state.config
+            choices = callbacks.voice_choices_for_model(cfg, model_id)
             return gr.Dropdown(
-                choices=callbacks.voice_choices_for_model(cfg, model_id),
+                choices=choices,
+                value=choices[0][1] if choices else None,
             )
 
         def _model_choices(config=None):
             cfg = config or state.config
-            return gr.Dropdown(choices=callbacks.model_choices(cfg))
+            choices = callbacks.model_choices(cfg)
+            return gr.Dropdown(choices=choices, value=choices[0][1] if choices else None)
 
         def _refresh_dropdowns(model_id=None, config=None):
             return _model_choices(config), _voice_choices(model_id, config)
@@ -410,13 +413,16 @@ def _build_app(state: AppState, multi_user: bool = False) -> gr.Blocks:
 
         with gr.Tab("Models") as models_tab:
             gr.Markdown("### Add Model")
+            _provider_list = list(PROVIDER_MODELS.keys())
+            _initial_provider = _provider_list[0] if _provider_list else None
             m_provider = gr.Dropdown(
-                choices=list(PROVIDER_MODELS.keys()),
+                choices=_provider_list,
+                value=_initial_provider,
                 label="Provider",
                 interactive=True,
             )
             m_model_select = gr.Dropdown(
-                choices=[],
+                choices=get_provider_model_choices(_initial_provider) if _initial_provider else [],
                 label="Model",
                 interactive=True,
             )
@@ -569,11 +575,13 @@ def _build_app(state: AppState, multi_user: bool = False) -> gr.Blocks:
                     custom_name=mname, session=session,
                 )
                 del_dd, edit_dd = _refresh_model_dropdowns(config=cfg)
+                models = callbacks.model_choices(cfg)
+                effective_model_id = current_model_id or (models[0][1] if models else None)
                 return (
                     table,
                     msg,
                     _model_choices(config=cfg),
-                    _voice_choices(current_model_id, config=cfg),
+                    _voice_choices(effective_model_id, config=cfg),
                     del_dd,
                     edit_dd,
                 )
@@ -606,11 +614,12 @@ def _build_app(state: AppState, multi_user: bool = False) -> gr.Blocks:
                     callbacks.load_model_for_edit(state, model_id, config=cfg)
                 )
                 choices = callbacks.model_choices(cfg)
+                effective_model_id = current_model_id or (choices[0][1] if choices else None)
                 return (
                     gr.Dataframe(value=table_data),
                     msg,
                     _model_choices(config=cfg),
-                    _voice_choices(current_model_id, config=cfg),
+                    _voice_choices(effective_model_id, config=cfg),
                     gr.Dropdown(choices=choices),
                     gr.Dropdown(choices=choices, value=model_id),
                     updated_name,
@@ -635,11 +644,18 @@ def _build_app(state: AppState, multi_user: bool = False) -> gr.Blocks:
                 cfg = _cfg(session)
                 table, msg = callbacks.delete_model(state, model_id, session=session)
                 del_dd, edit_dd = _refresh_model_dropdowns(config=cfg)
+                models = callbacks.model_choices(cfg)
+                model_ids = {c[1] for c in models}
+                # If the deleted model was the selected one, fall back to first available
+                if current_model_id and current_model_id not in model_ids:
+                    effective_model_id = models[0][1] if models else None
+                else:
+                    effective_model_id = current_model_id or (models[0][1] if models else None)
                 return (
                     table,
                     msg,
                     _model_choices(config=cfg),
-                    _voice_choices(current_model_id, config=cfg),
+                    _voice_choices(effective_model_id, config=cfg),
                     del_dd,
                     edit_dd,
                 )
@@ -860,7 +876,7 @@ def _build_app(state: AppState, multi_user: bool = False) -> gr.Blocks:
             )
             return (
                 gr.Dropdown(choices=models, value=initial_model_id),
-                gr.Dropdown(choices=voices),
+                gr.Dropdown(choices=voices, value=voices[0][1] if voices else None),
                 status,
             )
 
