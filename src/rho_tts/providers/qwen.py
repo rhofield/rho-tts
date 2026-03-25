@@ -9,6 +9,7 @@ import logging
 import os
 from typing import Dict, List, Optional, Union
 
+import numpy as np
 import torch
 
 from ..base_tts import BaseTTS
@@ -211,32 +212,116 @@ class QwenTTS(BaseTTS):
         return torch_wavs[0] if is_single else torch_wavs
 
     def _post_process_audio(self, audio: torch.Tensor) -> torch.Tensor:
-        """Normalize audio loudness for consistent voice output.
+        """Normalize audio loudness with decay correction.
 
-        Uses RMS-based gain normalization with soft clipping (tanh) to keep
-        voice in an optimal loudness range without harsh distortion.
+        Two-pass approach:
+        1. Windowed normalization — corrects volume decay by computing
+           per-window RMS and applying a smoothed gain envelope so the
+           volume stays consistent across the full duration.
+        2. Global normalization — brings overall loudness to target RMS.
+        3. Soft clipping (tanh) to prevent harsh distortion.
         """
         target_rms_db = -23.0
+        window_sec = 2.0
+        max_gain_db = 12.0
 
         original_shape = audio.shape
         if audio.dim() > 1:
             audio = audio.squeeze()
 
-        rms = torch.sqrt(torch.mean(audio ** 2))
-
-        if rms < 1e-8:
+        overall_rms = torch.sqrt(torch.mean(audio ** 2))
+        if overall_rms < 1e-8:
             return audio.reshape(original_shape)
 
-        current_rms_db = 20 * torch.log10(rms)
-        gain_db = target_rms_db - current_rms_db.item()
-        gain_linear = 10 ** (gain_db / 20)
+        # --- Pass 1: Windowed decay correction ---
+        n_samples = audio.shape[0]
+        sr = self.qwen3_sr or 24000
+        window_samples = int(sr * window_sec)
 
-        normalized = audio * gain_linear
+        if n_samples > window_samples * 2:
+            audio = self._apply_windowed_normalization(
+                audio, window_samples, max_gain_db,
+            )
 
+        # --- Pass 2: Global normalization to target RMS ---
+        rms = torch.sqrt(torch.mean(audio ** 2))
+        if rms > 1e-8:
+            current_rms_db = 20 * torch.log10(rms)
+            gain_db = target_rms_db - current_rms_db.item()
+            gain_linear = 10 ** (gain_db / 20)
+            audio = audio * gain_linear
+
+        # --- Pass 3: Soft clip ---
         max_amplitude = 0.95
-        normalized = torch.tanh(normalized / max_amplitude) * max_amplitude
+        audio = torch.tanh(audio / max_amplitude) * max_amplitude
 
-        return normalized.reshape(original_shape)
+        return audio.reshape(original_shape)
+
+    def _apply_windowed_normalization(
+        self,
+        audio: torch.Tensor,
+        window_samples: int,
+        max_gain_db: float,
+    ) -> torch.Tensor:
+        """Apply per-window gain to correct volume decay over time.
+
+        Computes RMS in non-overlapping windows, derives a per-window gain
+        to match the first window's energy, interpolates to a smooth
+        sample-level gain envelope, and applies it.
+        """
+        n_samples = audio.shape[0]
+        n_windows = n_samples // window_samples
+
+        if n_windows < 2:
+            return audio
+
+        # Compute per-window RMS
+        window_rms = []
+        for i in range(n_windows):
+            start = i * window_samples
+            end = start + window_samples
+            chunk = audio[start:end]
+            rms = torch.sqrt(torch.mean(chunk ** 2)).item()
+            window_rms.append(rms)
+
+        # Use the first window as the reference level
+        ref_rms = window_rms[0]
+        if ref_rms < 1e-8:
+            return audio
+
+        max_gain_linear = 10 ** (max_gain_db / 20)
+
+        # Compute per-window gain (capped)
+        window_gains = []
+        for rms in window_rms:
+            if rms < 1e-8:
+                window_gains.append(1.0)
+            else:
+                gain = ref_rms / rms
+                gain = min(gain, max_gain_linear)
+                window_gains.append(gain)
+
+        # Only apply correction if there's actual decay to fix
+        # (skip if all gains are close to 1.0)
+        gain_range = max(window_gains) - min(window_gains)
+        if gain_range < 0.05:
+            return audio
+
+        # Smooth the gain curve with a simple 3-tap moving average
+        smoothed = list(window_gains)
+        for _ in range(2):
+            new_smoothed = list(smoothed)
+            for i in range(1, len(smoothed) - 1):
+                new_smoothed[i] = (smoothed[i - 1] + smoothed[i] + smoothed[i + 1]) / 3
+            smoothed = new_smoothed
+
+        # Interpolate to sample-level gain envelope using numpy (vectorized)
+        centers = np.array([(i + 0.5) * window_samples for i in range(n_windows)])
+        sample_indices = np.arange(n_samples, dtype=np.float64)
+        gain_np = np.interp(sample_indices, centers, smoothed)
+        gain_envelope = torch.from_numpy(gain_np).float().to(audio.device)
+
+        return audio * gain_envelope
 
     def close(self) -> None:
         """Release model and free GPU memory."""

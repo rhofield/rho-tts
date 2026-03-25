@@ -69,6 +69,7 @@ class BaseTTS(ABC):
         # Validation thresholds (subclasses override as needed)
         self.accent_drift_threshold = 0.17
         self.text_similarity_threshold = 0.85
+        self.sound_decay_threshold = 0.3
 
         # Audio segment smoothing parameters
         self.silence_threshold_db = -50.0
@@ -248,6 +249,34 @@ class BaseTTS(ABC):
         except ImportError:
             logger.debug("STT validator not available, skipping text validation")
             return True, 1.0, None
+
+    def _validate_sound_decay(self, audio: torch.Tensor) -> tuple:
+        """Check if audio volume decays significantly over its duration.
+
+        Compares the RMS energy of the first and last thirds of the audio.
+        Returns (ratio, is_ok) where ratio is last_rms / first_rms.
+        A ratio below sound_decay_threshold means the audio has decayed too much.
+        """
+        if audio.numel() == 0:
+            return 1.0, True
+
+        flat = audio.flatten()
+        n = flat.shape[0]
+        third = n // 3
+
+        if third < 1:
+            return 1.0, True
+
+        first_rms = torch.sqrt(torch.mean(flat[:third] ** 2)).item()
+        last_rms = torch.sqrt(torch.mean(flat[-third:] ** 2)).item()
+
+        if first_rms < 1e-8:
+            return 1.0, True
+
+        ratio = last_rms / first_rms
+        threshold = getattr(self, 'sound_decay_threshold', 0.3)
+        is_ok = ratio >= threshold
+        return ratio, is_ok
 
     def _compute_speaker_similarity(self, wav_tensor: torch.Tensor) -> float:
         """
@@ -741,7 +770,15 @@ class BaseTTS(ABC):
                         drift_prob, is_voice_ok = self._validate_accent_drift(temp_path)
                         self._auto_sort_audio(temp_path, drift_prob)
 
-                        if drift_prob < best_drift:
+                        # Sound decay validation (runs on tensor, no temp file needed)
+                        decay_ratio, is_decay_ok = self._validate_sound_decay(audio)
+                        decay_thresh = getattr(self, 'sound_decay_threshold', 0.3)
+                        logger.info(
+                            f"      Sound decay ratio: {decay_ratio:.3f} "
+                            f"(threshold: {decay_thresh})"
+                        )
+
+                        if drift_prob < best_drift and is_decay_ok:
                             best_drift = drift_prob
                             best_audio = audio.clone()
                             logger.info(f"      New best: drift {best_drift:.3f}")
@@ -749,7 +786,7 @@ class BaseTTS(ABC):
                         is_text_ok = True
                         text_sim = 1.0
 
-                        if is_voice_ok:
+                        if is_voice_ok and is_decay_ok:
                             is_text_ok, text_sim, transcribed = self._validate_text_match(
                                 temp_path, segment
                             )
@@ -759,7 +796,7 @@ class BaseTTS(ABC):
                                 f"(threshold: {self.text_similarity_threshold})"
                             )
 
-                        if is_voice_ok and is_text_ok:
+                        if is_voice_ok and is_text_ok and is_decay_ok:
                             logger.info(
                                 f"    Segment {seg_idx + 1} valid after "
                                 f"{iteration + 1} iteration(s)"
@@ -772,6 +809,8 @@ class BaseTTS(ABC):
                             reasons.append(f"drift={drift_prob:.3f}")
                         if not is_text_ok:
                             reasons.append(f"text={text_sim:.3f}")
+                        if not is_decay_ok:
+                            reasons.append(f"decay={decay_ratio:.3f}")
                         logger.warning(
                             f"    Segment {seg_idx + 1} invalid: "
                             f"{', '.join(reasons)}, retrying "
