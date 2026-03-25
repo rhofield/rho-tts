@@ -12,7 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - New `_validate_sound_decay()` validation in the generation retry loop — rejects audio where the final third's RMS energy drops below `sound_decay_threshold` (default 0.3) relative to the first third, and retries with a new seed
   - Windowed RMS normalization in `QwenTTS._post_process_audio()` — computes per-window (2s) gain envelope to correct volume taper, smoothed with a 3-tap moving average to avoid artifacts, with a 12 dB max gain cap
   - `sound_decay_threshold` on `BaseTTS` (was previously defined on `QwenTTS` but never checked)
+- Automatic CUDA-to-CPU fallback in `QwenTTS._load_qwen3_model()` — when CUDA initialization fails (e.g. driver too old), the model is retried on CPU with a warning instead of crashing
 - Test suite for sound decay validation and windowed normalization (`tests/test_sound_decay.py`)
+
+### Fixed
+- Classifier trainer now raises a clear `ValueError` when the dataset has fewer than 5 samples, instead of crashing inside `train_test_split` with an opaque sklearn error
+- Test script (`scratch/test_testpypi.sh`) no longer hardcodes a stale version default; `--dataset-dir` defaults to empty (skip) instead of a machine-specific path
+- Workflow script (`scratch/workflow.py`) auto-detects CUDA availability and falls back to CPU; new `--device` flag for explicit override
 
 ## [1.0.9] - 2026-03-25
 

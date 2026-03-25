@@ -192,6 +192,12 @@ def train(
     if progress_callback:
         progress_callback(f"Loaded {len(X)} samples ({n_good} good, {n_bad} bad)")
 
+    if len(X) < 5:
+        raise ValueError(
+            f"Not enough samples to train a classifier (found {len(X)}, need at least 5). "
+            f"Add .wav files to {dataset_dir}/good/ and {dataset_dir}/bad/."
+        )
+
     # Train/test split
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=y

@@ -106,24 +106,7 @@ class QwenTTS(BaseTTS):
                 else:
                     logger.info(f"Will download model from HuggingFace: {model_path}")
 
-                # Try flash_attention_2 first, fall back to sdpa
-                try:
-                    self.qwen3_model = Qwen3TTSModel.from_pretrained(
-                        model_path,
-                        device_map=self.device,
-                        dtype=torch.bfloat16,
-                        attn_implementation="flash_attention_2",
-                    )
-                    logger.info("Qwen3-TTS model loaded with flash_attention_2")
-                except Exception as e:
-                    logger.warning(f"flash_attention_2 failed ({e}), falling back to sdpa...")
-                    self.qwen3_model = Qwen3TTSModel.from_pretrained(
-                        model_path,
-                        device_map=self.device,
-                        dtype=torch.bfloat16,
-                        attn_implementation="sdpa",
-                    )
-                    logger.info("Qwen3-TTS model loaded with sdpa attention")
+                self.qwen3_model = self._try_load_model(Qwen3TTSModel, model_path)
 
             except ImportError as e:
                 raise ImportError(
@@ -142,6 +125,60 @@ class QwenTTS(BaseTTS):
                         self._max_model_chars = min(self.MAX_MODEL_CHARS, max_pos)
             except Exception:
                 pass
+
+    def _try_load_model(self, model_cls, model_path: str):
+        """Try loading the model with attention fallback and CUDA fallback.
+
+        Order: flash_attention_2 → sdpa → CPU (if CUDA failed).
+        """
+        devices_to_try = [self.device]
+        if self.device == "cuda":
+            devices_to_try.append("cpu")
+
+        last_error = None
+        for device in devices_to_try:
+            if device != self.device:
+                logger.warning("CUDA failed, falling back to CPU...")
+
+            # Try flash_attention_2 first, then sdpa
+            for attn in ("flash_attention_2", "sdpa"):
+                try:
+                    model = model_cls.from_pretrained(
+                        model_path,
+                        device_map=device,
+                        dtype=torch.bfloat16,
+                        attn_implementation=attn,
+                    )
+                    if device != self.device:
+                        self.device = device
+                    logger.info(f"Qwen3-TTS model loaded with {attn} on {device}")
+                    return model
+                except ImportError:
+                    # flash_attn not installed — try next attn impl
+                    last_error = None
+                    continue
+                except RuntimeError as e:
+                    last_error = e
+                    err_msg = str(e).lower()
+                    if "cuda" in err_msg or "nvidia" in err_msg or "driver" in err_msg:
+                        # CUDA-level failure — skip to CPU fallback
+                        break
+                    if attn == "flash_attention_2":
+                        # Non-CUDA error on flash_attn — try sdpa
+                        logger.warning(f"flash_attention_2 failed ({e}), trying sdpa...")
+                        continue
+                    # sdpa also failed with non-CUDA error — re-raise
+                    raise
+                except Exception as e:
+                    last_error = e
+                    if attn == "flash_attention_2":
+                        logger.warning(f"flash_attention_2 failed ({e}), trying sdpa...")
+                        continue
+                    raise
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Failed to load model: no compatible configuration found")
 
         return self.qwen3_model
 
