@@ -6,6 +6,7 @@ from the target voice/accent.
 """
 import logging
 import os
+import warnings
 from typing import Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -111,6 +112,7 @@ def predict_accent_drift_probability(
     if feat is None:
         return None
 
-    prob = model.predict_proba([feat])[0][1]  # Probability of "bad"
-    logger.info(f"Accent drift likelihood: {prob:.2f}")
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*does not have valid feature names.*")
+        prob = model.predict_proba([feat])[0][1]  # Probability of "bad"
     return prob

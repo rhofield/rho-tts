@@ -7,6 +7,7 @@ default voice and voice cloning via reference audio.
 """
 import logging
 import os
+import warnings
 from typing import Dict, List, Optional, Union
 
 import numpy as np
@@ -106,7 +107,18 @@ class QwenTTS(BaseTTS):
                 else:
                     logger.info(f"Will download model from HuggingFace: {model_path}")
 
-                self.qwen3_model = self._try_load_model(Qwen3TTSModel, model_path)
+                # Suppress noisy "code_predictor_config is None" info from qwen_tts internals
+                class _CodePredictorFilter(logging.Filter):
+                    def filter(self, record):
+                        return "code_predictor_config is None" not in record.getMessage()
+
+                _tf_logger = logging.getLogger("transformers")
+                _filt = _CodePredictorFilter()
+                _tf_logger.addFilter(_filt)
+                try:
+                    self.qwen3_model = self._try_load_model(Qwen3TTSModel, model_path)
+                finally:
+                    _tf_logger.removeFilter(_filt)
 
             except ImportError as e:
                 raise ImportError(
@@ -218,29 +230,32 @@ class QwenTTS(BaseTTS):
 
         is_custom_voice = "CustomVoice" in self.model_path
 
-        if is_custom_voice and self.speaker:
-            wavs, sr = model.generate_custom_voice(
-                text=text_list,
-                speaker=self.speaker,
-                language=self.language,
-            )
-        elif is_custom_voice:
+        if is_custom_voice and not self.speaker:
             raise ValueError(
                 "CustomVoice model requires a named speaker. "
                 "Select a built-in voice (e.g. Vivian, Ryan) or provide reference audio with a Base model for voice cloning."
             )
-        elif self.voice_cloning:
-            wavs, sr = model.generate_voice_clone(
-                text=text_list,
-                language=self.language,
-                ref_audio=self.reference_audio_path,
-                ref_text=self.reference_text,
-            )
-        else:
+        if not is_custom_voice and not self.voice_cloning:
             raise ValueError(
                 "Qwen Base model requires reference audio for voice cloning. "
                 "Use a CustomVoice model with a named speaker, or provide reference audio."
             )
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*pad_token_id.*eos_token_id.*")
+            if is_custom_voice:
+                wavs, sr = model.generate_custom_voice(
+                    text=text_list,
+                    speaker=self.speaker,
+                    language=self.language,
+                )
+            else:
+                wavs, sr = model.generate_voice_clone(
+                    text=text_list,
+                    language=self.language,
+                    ref_audio=self.reference_audio_path,
+                    ref_text=self.reference_text,
+                )
 
         if self.qwen3_sr is None:
             self.qwen3_sr = sr
@@ -262,7 +277,7 @@ class QwenTTS(BaseTTS):
         """
         target_rms_db = -23.0
         window_sec = 2.0
-        max_gain_db = 12.0
+        max_gain_db = 18.0
 
         original_shape = audio.shape
         if audio.dim() > 1:

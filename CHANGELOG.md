@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.3] - 2026-03-26
+
+### Added
+- Word-level text diff logging on STT validation failures — shows missing, extra, and substituted words to help diagnose generation issues
+- Auto-sort documentation section in the README
+
+### Changed
+- Post-processing (windowed RMS normalization) now runs once on the final accepted audio instead of on every retry iteration, improving performance and avoiding double-normalization
+- Raised max normalization gain cap from 12 dB to 18 dB to better correct quiet endings
+- Simplified Qwen generation validation logic with early-exit checks before dispatching to model
+
+### Fixed
+- Auto-sort now catches `OSError` (permission denied, disk full) gracefully instead of crashing the generation pipeline
+- Suppressed noisy `code_predictor_config is None` log spam from Qwen model loading
+- Suppressed `pad_token_id` / `eos_token_id` warnings during Qwen generation
+- Suppressed sklearn feature-name warnings in accent drift classifier predictions
+- Added missing warning log when accent drift feature extraction fails
+- Accent drift probability now logged at the call site with threshold context
+
 ## [1.1.2] - 2026-03-25
 
 ### Added

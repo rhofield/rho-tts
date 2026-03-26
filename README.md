@@ -205,6 +205,35 @@ python -m rho_tts.validation.classifier.trainer \
     --output /path/to/voice_quality_model.pkl
 ```
 
+#### Auto-sorting samples
+
+During generation, samples can be automatically sorted into `good/` and `bad/` folders based on their drift score — building your training dataset as you generate.
+
+```python
+tts = TTSFactory.get_tts_instance(provider="qwen", reference_audio="voice.wav", reference_text="...")
+tts.voice_id = "my_voice"
+
+# Set the target directories
+tts.auto_sort_good_dir = "/path/to/dataset/good"
+tts.auto_sort_bad_dir = "/path/to/dataset/bad"
+
+# Set the thresholds (drift probability 0-1)
+tts.auto_sort_good_threshold = 0.10  # below this → good/
+tts.auto_sort_bad_threshold = 0.25   # above this → bad/
+
+# Samples between 0.10 and 0.25 are ambiguous and skipped
+tts.generate(texts, "output")
+```
+
+| Attribute | Description |
+|-----------|-------------|
+| `auto_sort_good_dir` | Directory to copy low-drift samples to |
+| `auto_sort_bad_dir` | Directory to copy high-drift samples to |
+| `auto_sort_good_threshold` | Drift prob below this → `good/` |
+| `auto_sort_bad_threshold` | Drift prob above this → `bad/` |
+
+The sorted files use the same `good/` / `bad/` structure the trainer expects, so you can point the trainer directly at the parent directory.
+
 #### Model lookup order
 
 When predicting accent drift, the classifier checks for models in this order:

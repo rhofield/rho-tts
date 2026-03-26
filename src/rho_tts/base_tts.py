@@ -208,8 +208,11 @@ class BaseTTS(ABC):
                 audio_path, voice_id=self.voice_id, model_path=self.drift_model_path,
             )
             if drift_prob is None:
+                logger.warning("Accent drift analysis failed (feature extraction error), skipping validation")
                 return 0.0, True
-            return drift_prob, drift_prob < self.accent_drift_threshold
+            passed = drift_prob < self.accent_drift_threshold
+            logger.info(f"Accent drift likelihood: {drift_prob:.2f} (threshold: {self.accent_drift_threshold:.2f})")
+            return drift_prob, passed
         except ImportError:
             logger.debug("Accent drift classifier not available, skipping validation")
             return 0.0, True
@@ -222,21 +225,24 @@ class BaseTTS(ABC):
         bad_thresh = getattr(self, 'auto_sort_bad_threshold', None)
         if good_dir is None and bad_dir is None:
             return
-        if good_dir and good_thresh is not None:
-            if drift_prob < good_thresh:
-                os.makedirs(good_dir, exist_ok=True)
-                dest = os.path.join(good_dir, os.path.basename(temp_path))
-                shutil.copy2(temp_path, dest)
-                logger.info(f"      Auto-sorted to good: {dest}")
-                return
-        if bad_dir and bad_thresh is not None:
-            if drift_prob > bad_thresh:
-                os.makedirs(bad_dir, exist_ok=True)
-                dest = os.path.join(bad_dir, os.path.basename(temp_path))
-                shutil.copy2(temp_path, dest)
-                logger.info(f"      Auto-sorted to bad: {dest}")
-                return
-        # Middle zone: skip
+        try:
+            if good_dir and good_thresh is not None:
+                if drift_prob < good_thresh:
+                    os.makedirs(good_dir, exist_ok=True)
+                    dest = os.path.join(good_dir, os.path.basename(temp_path))
+                    shutil.copy2(temp_path, dest)
+                    logger.info(f"      Auto-sorted to good: {dest}")
+                    return
+            if bad_dir and bad_thresh is not None:
+                if drift_prob > bad_thresh:
+                    os.makedirs(bad_dir, exist_ok=True)
+                    dest = os.path.join(bad_dir, os.path.basename(temp_path))
+                    shutil.copy2(temp_path, dest)
+                    logger.info(f"      Auto-sorted to bad: {dest}")
+                    return
+            # Middle zone: skip
+        except OSError as e:
+            logger.warning(f"      Auto-sort failed (non-fatal): {e}")
 
     def _validate_text_match(self, audio_path: str, expected_text: str) -> tuple:
         """Run STT text matching validation if available."""
@@ -249,6 +255,43 @@ class BaseTTS(ABC):
         except ImportError:
             logger.debug("STT validator not available, skipping text validation")
             return True, 1.0, None
+
+    def _log_text_diff(self, expected: str, transcribed: str) -> None:
+        """Log word-level differences between expected and transcribed text."""
+        from difflib import SequenceMatcher
+
+        exp_words = expected.lower().split()
+        trans_words = transcribed.lower().split()
+        sm = SequenceMatcher(None, exp_words, trans_words)
+
+        missing = []  # in expected but not transcribed
+        added = []    # in transcribed but not expected
+        changed = []  # substitutions
+
+        for op, i1, i2, j1, j2 in sm.get_opcodes():
+            if op == "delete":
+                missing.extend(exp_words[i1:i2])
+            elif op == "insert":
+                added.extend(trans_words[j1:j2])
+            elif op == "replace":
+                changed.append(
+                    f"'{' '.join(exp_words[i1:i2])}' -> '{' '.join(trans_words[j1:j2])}'"
+                )
+
+        parts = []
+        if missing:
+            parts.append(f"missing: {' '.join(missing)}")
+        if added:
+            parts.append(f"extra: {' '.join(added)}")
+        if changed:
+            parts.append(f"changed: {', '.join(changed)}")
+
+        if parts:
+            logger.warning(f"      Text diff: {'; '.join(parts)}")
+        else:
+            logger.warning(f"      Text diff: difference is in punctuation/formatting only")
+            logger.warning(f"      Expected: {expected[:80]}")
+            logger.warning(f"      Got:      {transcribed[:80]}")
 
     def _validate_sound_decay(self, audio: torch.Tensor) -> tuple:
         """Check if audio volume decays significantly over its duration.
@@ -721,8 +764,7 @@ class BaseTTS(ABC):
                     logger.info(f"    Iteration {iteration + 1}: seed {self.seed}")
 
                     try:
-                        raw = self._generate_audio(segment)
-                        audio = self._post_process_audio(raw)
+                        audio = self._generate_audio(segment)
                         last_audio = audio
                     except ValueError:
                         raise  # config error — don't retry
@@ -795,6 +837,11 @@ class BaseTTS(ABC):
                                 f"      Text similarity: {text_sim:.3f} "
                                 f"(threshold: {self.text_similarity_threshold})"
                             )
+                            if not is_text_ok and transcribed:
+                                try:
+                                    self._log_text_diff(segment, transcribed)
+                                except Exception as e:
+                                    logger.debug(f"Could not compute text diff: {e}")
 
                         if is_voice_ok and is_text_ok and is_decay_ok:
                             logger.info(
@@ -863,6 +910,14 @@ class BaseTTS(ABC):
                 logger.error(f"Item {idx + 1} failed: segment join returned None")
                 results.append(None)
                 continue
+
+            try:
+                final_audio = self._post_process_audio(final_audio)
+            except Exception as e:
+                logger.warning(
+                    f"  Item {idx + 1}: post-processing failed ({e}), "
+                    f"using raw audio"
+                )
 
             metadata = {}
             if item_drift_scores:
