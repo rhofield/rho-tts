@@ -48,3 +48,7 @@ dataset/
 
 # Local scratch scripts (not part of library)
 scratch/
+
+.claude/
+Dockerfile
+requirements-frozen.txt
