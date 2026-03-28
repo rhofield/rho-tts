@@ -29,6 +29,8 @@ class FakeTTS(BaseTTS):
         self.max_iterations = 1
         self.accent_drift_threshold = 0.17
         self.text_similarity_threshold = 0.85
+        self.sound_decay_threshold = 0.3
+        self.max_decay_retries = 3
         self.voice_id = kwargs.get("voice_id")
         self.drift_model_path = kwargs.get("drift_model_path")
         self._max_chars_explicit = True

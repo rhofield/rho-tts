@@ -31,3 +31,4 @@ class GenerationResult:
     format: str = "wav"
     drift_prob: Optional[float] = None
     text_similarity: Optional[float] = None
+    decay_ratio: Optional[float] = None

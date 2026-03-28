@@ -70,6 +70,7 @@ class BaseTTS(ABC):
         self.accent_drift_threshold = 0.17
         self.text_similarity_threshold = 0.85
         self.sound_decay_threshold = 0.3
+        self.max_decay_retries = 3
 
         # Audio segment smoothing parameters
         self.silence_threshold_db = -50.0
@@ -730,200 +731,226 @@ class BaseTTS(ABC):
             segments = self._split_text_into_segments(text, effective_max_chars)
             logger.info(f"Text item {idx + 1}: {len(text)} chars -> {len(segments)} segment(s)")
 
+            decay_thresh = self.sound_decay_threshold
+            max_decay_retries = self.max_decay_retries
+            final_audio = None
             audio_segments = []
-            item_drift_scores = []
-            item_text_sim_scores = []
-            for seg_idx, segment in enumerate(segments):
-                if token.is_cancelled():
-                    raise CancelledException(
-                        f"Cancelled during segment {seg_idx + 1} of item {idx + 1}"
+            decay_ratio = 0.0
+            is_decay_ok = True
+
+            for decay_attempt in range(max_decay_retries):
+                if decay_attempt > 0:
+                    self.seed = int(time.time() * 1000) % 100000
+                    logger.warning(
+                        f"  Item {idx + 1}: sound decay detected, "
+                        f"regenerating all segments "
+                        f"(attempt {decay_attempt + 1}/{max_decay_retries})"
                     )
 
-                logger.info(f"  Segment {seg_idx + 1}/{len(segments)} ({len(segment)} chars)")
-                if progress_callback:
-                    progress_callback(f"Generating segment {seg_idx + 1}/{len(segments)}...")
-
-                # --- Retry/validation loop ---
-                self._set_seeds()
-                best_audio = None
-                best_drift = float('inf')
-                best_text_sim = None
-                last_audio = None
-
-                for iteration in range(self.max_iterations):
+                audio_segments = []
+                item_drift_scores = []
+                item_text_sim_scores = []
+                for seg_idx, segment in enumerate(segments):
                     if token.is_cancelled():
                         raise CancelledException(
-                            f"Cancelled during iteration {iteration} of "
-                            f"segment {seg_idx + 1}, item {idx + 1}"
+                            f"Cancelled during segment {seg_idx + 1} of item {idx + 1}"
                         )
 
-                    if iteration > 0:
-                        self.seed = int(time.time() * 1000) % 100000
-                        self._set_seeds()
+                    logger.info(f"  Segment {seg_idx + 1}/{len(segments)} ({len(segment)} chars)")
+                    if progress_callback:
+                        progress_callback(f"Generating segment {seg_idx + 1}/{len(segments)}...")
 
-                    logger.info(f"    Iteration {iteration + 1}: seed {self.seed}")
+                    # --- Retry/validation loop ---
+                    self._set_seeds()
+                    best_audio = None
+                    best_drift = float('inf')
+                    best_text_sim = None
+                    last_audio = None
 
-                    try:
-                        audio = self._generate_audio(segment)
-                        last_audio = audio
-                    except ValueError:
-                        raise  # config error — don't retry
-                    except RuntimeError as e:
-                        if "out of memory" in str(e).lower() or "length" in str(e).lower():
-                            logger.error(f"    Segment {seg_idx + 1} OOM: {e}")
-                            if torch.cuda.is_available():
-                                torch.cuda.empty_cache()
+                    for iteration in range(self.max_iterations):
+                        if token.is_cancelled():
+                            raise CancelledException(
+                                f"Cancelled during iteration {iteration} of "
+                                f"segment {seg_idx + 1}, item {idx + 1}"
+                            )
+
+                        if iteration > 0:
+                            self.seed = int(time.time() * 1000) % 100000
+                            self._set_seeds()
+
+                        logger.info(f"    Iteration {iteration + 1}: seed {self.seed}")
+
+                        try:
+                            audio = self._generate_audio(segment)
+                            last_audio = audio
+                        except ValueError:
+                            raise  # config error — don't retry
+                        except RuntimeError as e:
+                            if "out of memory" in str(e).lower() or "length" in str(e).lower():
+                                logger.error(f"    Segment {seg_idx + 1} OOM: {e}")
+                                if torch.cuda.is_available():
+                                    torch.cuda.empty_cache()
+                                continue
+                            raise
+                        except Exception as e:
+                            logger.warning(f"    Segment {seg_idx + 1}: generation error ({e})")
                             continue
-                        raise
-                    except Exception as e:
-                        logger.warning(f"    Segment {seg_idx + 1}: generation error ({e})")
-                        continue
 
-                    # Skip validation when max_iterations == 1
-                    if self.max_iterations == 1:
-                        best_audio = audio
-                        if getattr(self, 'auto_sort_good_dir', None) or getattr(self, 'auto_sort_bad_dir', None):
-                            # Run drift detection for auto-sort even without validation retries
-                            fd, temp_path = tempfile.mkstemp(suffix=".wav", prefix="rho_tts_validate_")
-                            os.close(fd)
-                            try:
-                                save_wav = audio.cpu() if audio.device.type != 'cpu' else audio
-                                if save_wav.dim() == 1:
-                                    save_wav = save_wav.unsqueeze(0)
-                                self._save_wav(temp_path, save_wav, self.sample_rate)
-                                drift_prob, _ = self._validate_accent_drift(temp_path)
-                                self._auto_sort_audio(temp_path, drift_prob)
-                            finally:
-                                if os.path.exists(temp_path):
-                                    try:
-                                        os.remove(temp_path)
-                                    except OSError:
-                                        pass
-                        break
-
-                    fd, temp_path = tempfile.mkstemp(suffix=".wav", prefix="rho_tts_validate_")
-                    os.close(fd)
-                    try:
-                        save_wav = audio.cpu() if audio.device.type != 'cpu' else audio
-                        if save_wav.dim() == 1:
-                            save_wav = save_wav.unsqueeze(0)
-                        self._save_wav(temp_path, save_wav, self.sample_rate)
-
-                        drift_prob, is_voice_ok = self._validate_accent_drift(temp_path)
-                        self._auto_sort_audio(temp_path, drift_prob)
-
-                        # Sound decay validation (runs on tensor, no temp file needed)
-                        decay_ratio, is_decay_ok = self._validate_sound_decay(audio)
-                        decay_thresh = getattr(self, 'sound_decay_threshold', 0.3)
-                        logger.info(
-                            f"      Sound decay ratio: {decay_ratio:.3f} "
-                            f"(threshold: {decay_thresh})"
-                        )
-
-                        if drift_prob < best_drift and is_decay_ok:
-                            best_drift = drift_prob
-                            best_audio = audio.clone()
-                            logger.info(f"      New best: drift {best_drift:.3f}")
-
-                        is_text_ok = True
-                        text_sim = 1.0
-
-                        if is_voice_ok and is_decay_ok:
-                            is_text_ok, text_sim, transcribed = self._validate_text_match(
-                                temp_path, segment
-                            )
-                            best_text_sim = text_sim
-                            logger.info(
-                                f"      Text similarity: {text_sim:.3f} "
-                                f"(threshold: {self.text_similarity_threshold})"
-                            )
-                            if not is_text_ok and transcribed:
-                                try:
-                                    self._log_text_diff(segment, transcribed)
-                                except Exception as e:
-                                    logger.debug(f"Could not compute text diff: {e}")
-
-                        if is_voice_ok and is_text_ok and is_decay_ok:
-                            logger.info(
-                                f"    Segment {seg_idx + 1} valid after "
-                                f"{iteration + 1} iteration(s)"
-                            )
+                        # Skip validation when max_iterations == 1
+                        if self.max_iterations == 1:
                             best_audio = audio
+                            if getattr(self, 'auto_sort_good_dir', None) or getattr(self, 'auto_sort_bad_dir', None):
+                                # Run drift detection for auto-sort even without validation retries
+                                fd, temp_path = tempfile.mkstemp(suffix=".wav", prefix="rho_tts_validate_")
+                                os.close(fd)
+                                try:
+                                    save_wav = audio.cpu() if audio.device.type != 'cpu' else audio
+                                    if save_wav.dim() == 1:
+                                        save_wav = save_wav.unsqueeze(0)
+                                    self._save_wav(temp_path, save_wav, self.sample_rate)
+                                    drift_prob, _ = self._validate_accent_drift(temp_path)
+                                    self._auto_sort_audio(temp_path, drift_prob)
+                                finally:
+                                    if os.path.exists(temp_path):
+                                        try:
+                                            os.remove(temp_path)
+                                        except OSError:
+                                            pass
                             break
 
-                        reasons = []
-                        if not is_voice_ok:
-                            reasons.append(f"drift={drift_prob:.3f}")
-                        if not is_text_ok:
-                            reasons.append(f"text={text_sim:.3f}")
-                        if not is_decay_ok:
-                            reasons.append(f"decay={decay_ratio:.3f}")
-                        logger.warning(
-                            f"    Segment {seg_idx + 1} invalid: "
-                            f"{', '.join(reasons)}, retrying "
-                            f"({iteration + 1}/{self.max_iterations})"
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            f"    Segment {seg_idx + 1}: validation error ({e})"
-                        )
-                    finally:
-                        if os.path.exists(temp_path):
-                            try:
-                                os.remove(temp_path)
-                            except OSError:
-                                pass
+                        fd, temp_path = tempfile.mkstemp(suffix=".wav", prefix="rho_tts_validate_")
+                        os.close(fd)
+                        try:
+                            save_wav = audio.cpu() if audio.device.type != 'cpu' else audio
+                            if save_wav.dim() == 1:
+                                save_wav = save_wav.unsqueeze(0)
+                            self._save_wav(temp_path, save_wav, self.sample_rate)
 
-                    del audio
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                else:  # for/else: runs when the loop exhausts without a break
+                            drift_prob, is_voice_ok = self._validate_accent_drift(temp_path)
+                            self._auto_sort_audio(temp_path, drift_prob)
+
+                            if drift_prob < best_drift:
+                                best_drift = drift_prob
+                                best_audio = audio.clone()
+                                logger.info(f"      New best: drift {best_drift:.3f}")
+
+                            is_text_ok = True
+                            text_sim = 1.0
+
+                            if is_voice_ok:
+                                is_text_ok, text_sim, transcribed = self._validate_text_match(
+                                    temp_path, segment
+                                )
+                                best_text_sim = text_sim
+                                logger.info(
+                                    f"      Text similarity: {text_sim:.3f} "
+                                    f"(threshold: {self.text_similarity_threshold})"
+                                )
+                                if not is_text_ok and transcribed:
+                                    try:
+                                        self._log_text_diff(segment, transcribed)
+                                    except Exception as e:
+                                        logger.debug(f"Could not compute text diff: {e}")
+
+                            if is_voice_ok and is_text_ok:
+                                logger.info(
+                                    f"    Segment {seg_idx + 1} valid after "
+                                    f"{iteration + 1} iteration(s)"
+                                )
+                                best_audio = audio
+                                break
+
+                            reasons = []
+                            if not is_voice_ok:
+                                reasons.append(f"drift={drift_prob:.3f}")
+                            if not is_text_ok:
+                                reasons.append(f"text={text_sim:.3f}")
+                            logger.warning(
+                                f"    Segment {seg_idx + 1} invalid: "
+                                f"{', '.join(reasons)}, retrying "
+                                f"({iteration + 1}/{self.max_iterations})"
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                f"    Segment {seg_idx + 1}: validation error ({e})"
+                            )
+                        finally:
+                            if os.path.exists(temp_path):
+                                try:
+                                    os.remove(temp_path)
+                                except OSError:
+                                    pass
+
+                        del audio
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                    else:  # for/else: runs when the loop exhausts without a break
+                        if best_audio is not None:
+                            logger.warning(
+                                f"    Segment {seg_idx + 1}: max iterations reached, "
+                                f"returning best (drift={best_drift:.3f})"
+                            )
+                        elif last_audio is not None:
+                            best_audio = last_audio
+                            logger.warning(
+                                f"    Segment {seg_idx + 1}: max iterations reached, "
+                                f"returning last audio"
+                            )
+
                     if best_audio is not None:
-                        logger.warning(
-                            f"    Segment {seg_idx + 1}: max iterations reached, "
-                            f"returning best (drift={best_drift:.3f})"
-                        )
-                    elif last_audio is not None:
-                        best_audio = last_audio
-                        logger.warning(
-                            f"    Segment {seg_idx + 1}: max iterations reached, "
-                            f"returning last audio"
-                        )
+                        audio_segments.append(best_audio)
+                        if best_drift != float('inf'):
+                            item_drift_scores.append(best_drift)
+                        if best_text_sim is not None:
+                            item_text_sim_scores.append(best_text_sim)
+                    else:
+                        logger.error(f"  Segment {seg_idx + 1} failed to generate")
 
-                if best_audio is not None:
-                    audio_segments.append(best_audio)
-                    if best_drift != float('inf'):
-                        item_drift_scores.append(best_drift)
-                    if best_text_sim is not None:
-                        item_text_sim_scores.append(best_text_sim)
-                else:
-                    logger.error(f"  Segment {seg_idx + 1} failed to generate")
+                if not audio_segments:
+                    break
 
-            if not audio_segments:
-                logger.error(f"Item {idx + 1} failed: no segments generated")
-                results.append(None)
-                continue
+                final_audio = self._smooth_segment_join(audio_segments)
 
-            final_audio = self._smooth_segment_join(audio_segments)
+                if final_audio is None:
+                    break
 
-            if final_audio is None:
-                logger.error(f"Item {idx + 1} failed: segment join returned None")
-                results.append(None)
-                continue
+                try:
+                    final_audio = self._post_process_audio(final_audio)
+                except Exception as e:
+                    logger.warning(
+                        f"  Item {idx + 1}: post-processing failed ({e}), "
+                        f"using raw audio"
+                    )
 
-            try:
-                final_audio = self._post_process_audio(final_audio)
-            except Exception as e:
-                logger.warning(
-                    f"  Item {idx + 1}: post-processing failed ({e}), "
-                    f"using raw audio"
+                # Validate sound decay on the full post-processed audio
+                decay_ratio, is_decay_ok = self._validate_sound_decay(final_audio)
+                logger.info(
+                    f"  Item {idx + 1} sound decay ratio: {decay_ratio:.3f} "
+                    f"(threshold: {decay_thresh})"
                 )
+
+                if is_decay_ok:
+                    break
+            else:
+                if final_audio is not None and not is_decay_ok:
+                    logger.warning(
+                        f"  Item {idx + 1}: sound decay persisted after "
+                        f"{max_decay_retries} attempt(s) "
+                        f"(ratio={decay_ratio:.3f}, threshold={decay_thresh}), "
+                        f"returning best available audio"
+                    )
+
+            if final_audio is None or not audio_segments:
+                logger.error(f"Item {idx + 1} failed: no audio generated")
+                results.append(None)
+                continue
 
             metadata = {}
             if item_drift_scores:
                 metadata["drift_prob"] = max(item_drift_scores)
             if item_text_sim_scores:
                 metadata["text_similarity"] = min(item_text_sim_scores)
+            metadata["decay_ratio"] = decay_ratio
             results.append((final_audio, len(audio_segments), metadata))
 
         return results
@@ -1009,6 +1036,7 @@ class BaseTTS(ABC):
                     format=format,
                     drift_prob=metadata.get("drift_prob"),
                     text_similarity=metadata.get("text_similarity"),
+                    decay_ratio=metadata.get("decay_ratio"),
                 )
 
                 # Save to disk if output_path provided

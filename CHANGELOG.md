@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.4] - 2026-03-28
+
+### Changed
+- Sound decay validation now runs on the full joined + post-processed audio instead of per-segment, catching decay that only appears when segments are concatenated
+- Sound decay retry loop regenerates all segments (with a new seed) when decay is detected, up to `max_decay_retries` (default 3) attempts
+- `num2words`, `nemo_text_processing`, and `text2num` promoted from `validation` optional extra to core dependencies — number normalization is now always available
+- Number normalizer no longer uses try/except import guards; dependencies are guaranteed present
+- Sound decay is no longer a per-segment rejection criterion in the validation retry loop — drift and text checks still run per-segment, but decay is evaluated holistically on the final output
+
+### Added
+- `max_decay_retries` attribute on `BaseTTS` (default 3) — controls how many full-regeneration attempts are made when sound decay is detected
+- `decay_ratio` field on `GenerationResult` — reports the final sound decay ratio in generation metadata
+- Number normalizer now strips digit-group commas (`"1,500"` → `"1500"`) and currency symbols (`"$500"` → `"500"`) before normalization
+
+### Fixed
+- Sound decay that only manifested in the joined multi-segment audio (not in individual segments) is now caught and corrected
+
 ## [1.1.3] - 2026-03-26
 
 ### Added

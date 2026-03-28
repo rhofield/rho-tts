@@ -129,6 +129,8 @@ All thresholds and parameters can be set via constructor kwargs:
 | `max_iterations` | `10`/`50` | Max validation retry loops |
 | `accent_drift_threshold` | `0.17` | Max accent drift probability |
 | `text_similarity_threshold` | `0.85`/`0.75` | Min STT text match score |
+| `sound_decay_threshold` | `0.3` | Max RMS decay ratio (final vs first third) |
+| `max_decay_retries` | `3` | Full-regeneration attempts on sound decay |
 | `batch_size` | `5` | Texts per batch (Qwen only) |
 
 ## Custom Providers
