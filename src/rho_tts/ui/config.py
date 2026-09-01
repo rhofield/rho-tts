@@ -64,6 +64,32 @@ PROVIDER_MODELS: dict[str, list[dict]] = {
             },
         },
     ],
+    "breeze": [
+        {
+            # Cloning with cfg_scale 1.0: the instruction is present but not
+            # steered, so the reference timbre drives the result.
+            "display_name": "Breeze-TTS-2 (Voice Cloning)",
+            "defaults": {
+                "instruction": "Speak clearly and naturally.",
+                "cfg_scale": 1.0,
+                "max_iterations": 10,
+                "accent_drift_threshold": 0.17,
+                "text_similarity_threshold": 0.85,
+            },
+        },
+        {
+            # cfg_scale 4.0 is upstream's recommended strength for making the
+            # instruction actually steer tone, pace and emotion.
+            "display_name": "Breeze-TTS-2 (Voice Direction — instruction steering)",
+            "defaults": {
+                "instruction": "Speak clearly and naturally.",
+                "cfg_scale": 4.0,
+                "max_iterations": 10,
+                "accent_drift_threshold": 0.17,
+                "text_similarity_threshold": 0.85,
+            },
+        },
+    ],
     "chatterbox": [
         {
             "display_name": "Chatterbox Standard",
@@ -84,6 +110,14 @@ PROVIDER_MODELS: dict[str, list[dict]] = {
             },
         },
     ],
+}
+
+
+# Parameters only meaningful to one provider. Used both to hide the controls in
+# the UI and to keep them out of other providers' constructor kwargs.
+PROVIDER_ONLY_PARAMS: dict[str, set[str]] = {
+    "chatterbox": {"temperature", "cfg_weight"},
+    "breeze": {"instruction", "cfg_scale"},
 }
 
 
@@ -168,6 +202,14 @@ _QWEN_CUSTOM_SPEAKERS: list[dict] = [
 
 BUILTIN_VOICES: List[VoiceProfile] = [
     VoiceProfile(id="builtin:chatterbox_default", name="Chatterbox Default", provider="chatterbox"),
+    # Breeze can synthesise a voice from the instruction text alone, with no
+    # reference audio — the only built-in voice here that needs no recording.
+    VoiceProfile(
+        id="builtin:breeze_design",
+        name="Breeze — Voice Design",
+        provider="breeze",
+        description="Voice generated from the instruction text; no reference audio needed",
+    ),
     *(
         VoiceProfile(
             id=f"builtin:qwen_{s['name'].lower()}",

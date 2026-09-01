@@ -236,8 +236,12 @@ PARAM_DEFAULTS = {
     "max_iterations": 10,
     "accent_drift_threshold": 0.17,
     "text_similarity_threshold": 0.85,
+    # chatterbox-only
     "temperature": 1.0,
     "cfg_weight": 0.6,
+    # breeze-only
+    "instruction": "Speak clearly and naturally.",
+    "cfg_scale": 1.0,
 }
 
 
@@ -252,7 +256,8 @@ def load_model_voice_params(
 
     Returns:
         (seed, max_iterations, accent_drift_threshold, text_similarity_threshold,
-         temperature, cfg_weight, label, is_chatterbox)
+         temperature, cfg_weight, instruction, cfg_scale, label,
+         is_chatterbox, is_breeze)
     """
     cfg = config or state.config
 
@@ -264,7 +269,10 @@ def load_model_voice_params(
             PARAM_DEFAULTS["text_similarity_threshold"],
             PARAM_DEFAULTS["temperature"],
             PARAM_DEFAULTS["cfg_weight"],
+            PARAM_DEFAULTS["instruction"],
+            PARAM_DEFAULTS["cfg_scale"],
             "Select a voice and model to load parameters.",
+            False,
             False,
         )
 
@@ -277,11 +285,15 @@ def load_model_voice_params(
             PARAM_DEFAULTS["text_similarity_threshold"],
             PARAM_DEFAULTS["temperature"],
             PARAM_DEFAULTS["cfg_weight"],
+            PARAM_DEFAULTS["instruction"],
+            PARAM_DEFAULTS["cfg_scale"],
             "Select a voice and model to load parameters.",
+            False,
             False,
         )
 
     is_chatterbox = model_cfg.provider == "chatterbox"
+    is_breeze = model_cfg.provider == "breeze"
 
     # Fall back chain: saved overrides → model params → provider defaults
     key = get_phonetic_key(voice_id, model_id)
@@ -312,8 +324,11 @@ def load_model_voice_params(
         _get("text_similarity_threshold"),
         _get("temperature"),
         _get("cfg_weight"),
+        _get("instruction"),
+        _get("cfg_scale"),
         label,
         is_chatterbox,
+        is_breeze,
     )
 
 
@@ -327,6 +342,8 @@ def save_model_voice_params(
     text_similarity_threshold: Optional[float],
     temperature: Optional[float],
     cfg_weight: Optional[float],
+    instruction: Optional[str] = None,
+    cfg_scale: Optional[float] = None,
     session: Optional[SessionContext] = None,
 ) -> str:
     """Save per-voice+model parameter overrides to config."""
@@ -347,6 +364,8 @@ def save_model_voice_params(
         "text_similarity_threshold": _val("text_similarity_threshold", float, text_similarity_threshold),
         "temperature":              _val("temperature", float, temperature),
         "cfg_weight":               _val("cfg_weight", float, cfg_weight),
+        "instruction":              _val("instruction", str, instruction),
+        "cfg_scale":                _val("cfg_scale", float, cfg_scale),
     }
     ctx.save()
     state.invalidate_tts()

@@ -11,10 +11,11 @@ from typing import Optional
 
 import torch
 
+from ..base_tts import BaseTTS
 from ..cancellation import CancellationToken
 from ..factory import TTSFactory
-from ..base_tts import BaseTTS
 from .config import (
+    PROVIDER_ONLY_PARAMS,
     AppConfig,
     GenerationRecord,
     ModelConfig,
@@ -103,16 +104,20 @@ class AppState:
             }
 
             # Apply per-voice+model parameter overrides (after model defaults).
-            # Filter out chatterbox-specific params for other providers to avoid
-            # passing unknown kwargs to constructors that don't accept them.
+            # Params that belong to a different provider are dropped, so we never
+            # pass unknown kwargs to a constructor that doesn't accept them.
             if voice_profile:
                 params_key = get_phonetic_key(voice_profile.id, model_config.id)
                 voice_model_params = cfg.model_voice_params.get(params_key, {})
                 if voice_model_params:
-                    _CHATTERBOX_ONLY = {"temperature", "cfg_weight"}
+                    foreign = {
+                        param
+                        for provider, params in PROVIDER_ONLY_PARAMS.items()
+                        for param in params
+                        if provider != model_config.provider
+                    }
                     filtered = {
-                        k: v for k, v in voice_model_params.items()
-                        if k not in _CHATTERBOX_ONLY or model_config.provider == "chatterbox"
+                        k: v for k, v in voice_model_params.items() if k not in foreign
                     }
                     kwargs.update(filtered)
 
@@ -133,8 +138,12 @@ class AppState:
                 if model_config.provider == "qwen":
                     kwargs["language"] = voice_profile.language
 
-                # Qwen needs reference_text when doing voice cloning
-                if model_config.provider == "qwen" and voice_profile.reference_text:
+                # Qwen and Breeze both align reference audio against its exact
+                # transcript, so they need reference_text when voice cloning.
+                if (
+                    model_config.provider in ("qwen", "breeze")
+                    and voice_profile.reference_text
+                ):
                     kwargs["reference_text"] = voice_profile.reference_text
 
             # Extract auto-sort params before passing to factory

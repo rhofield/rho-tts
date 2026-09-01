@@ -19,7 +19,13 @@ from typing import Optional
 import gradio as gr
 
 from . import callbacks
-from .config import PROVIDER_MODELS, get_provider_model_choices, get_provider_model_defaults, is_model_cached, load_config
+from .config import (
+    PROVIDER_MODELS,
+    get_provider_model_choices,
+    get_provider_model_defaults,
+    is_model_cached,
+    load_config,
+)
 from .session import SessionContext
 from .state import AppState
 
@@ -153,6 +159,17 @@ def _build_app(state: AppState, multi_user: bool = False) -> gr.Blocks:
                         label="cfg_weight", minimum=0.1, maximum=1.0, step=0.05, value=0.6, visible=False,
                     )
                 with gr.Row():
+                    params_instruction = gr.Textbox(
+                        label="instruction",
+                        info="Breeze: describe the voice or delivery, e.g. 'Sound tired and resigned.'",
+                        value="Speak clearly and naturally.", lines=2, visible=False,
+                    )
+                    params_cfg_scale = gr.Slider(
+                        label="cfg_scale",
+                        info="Instruction strength. 1.0 = off; ~4.0 to actually steer delivery.",
+                        minimum=1.0, maximum=8.0, step=0.5, value=1.0, visible=False,
+                    )
+                with gr.Row():
                     params_speed = gr.Slider(
                         label="Speed", minimum=0.5, maximum=2.0, step=0.05, value=1.0,
                     )
@@ -176,13 +193,15 @@ def _build_app(state: AppState, multi_user: bool = False) -> gr.Blocks:
                 """Reload phonetic mapping and params when voice changes."""
                 cfg = _cfg(session)
                 rows, mapping_label_val = callbacks.load_phonetic_mapping(state, voice_id, model_id, config=cfg)
-                seed, max_iter, accent, text_sim, temp, cfg_w, plabel, is_cb = \
+                seed, max_iter, accent, text_sim, temp, cfg_w, instr, cfg_sc, plabel, is_cb, is_bz = \
                     callbacks.load_model_voice_params(state, voice_id, model_id, config=cfg)
                 return (
                     rows, mapping_label_val,
                     seed, max_iter, accent, text_sim,
                     gr.update(value=temp, visible=is_cb),
                     gr.update(value=cfg_w, visible=is_cb),
+                    gr.update(value=instr, visible=is_bz),
+                    gr.update(value=cfg_sc, visible=is_bz),
                     plabel,
                 )
 
@@ -195,7 +214,7 @@ def _build_app(state: AppState, multi_user: bool = False) -> gr.Blocks:
                 rows, mapping_label_val = callbacks.load_phonetic_mapping(
                     state, new_voice_id, model_id, config=cfg,
                 )
-                seed, max_iter, accent, text_sim, temp, cfg_w, plabel, is_cb = \
+                seed, max_iter, accent, text_sim, temp, cfg_w, instr, cfg_sc, plabel, is_cb, is_bz = \
                     callbacks.load_model_voice_params(state, new_voice_id, model_id, config=cfg)
                 status = callbacks.status_for_model_voice(cfg, model_id, choices)
                 return (
@@ -206,6 +225,8 @@ def _build_app(state: AppState, multi_user: bool = False) -> gr.Blocks:
                     seed, max_iter, accent, text_sim,
                     gr.update(value=temp, visible=is_cb),
                     gr.update(value=cfg_w, visible=is_cb),
+                    gr.update(value=instr, visible=is_bz),
+                    gr.update(value=cfg_sc, visible=is_bz),
                     plabel,
                 )
 
@@ -215,7 +236,8 @@ def _build_app(state: AppState, multi_user: bool = False) -> gr.Blocks:
                 outputs=[
                     mapping_df, mapping_label,
                     params_seed, params_max_iter, params_accent, params_text_sim,
-                    params_temperature, params_cfg_weight, params_label,
+                    params_temperature, params_cfg_weight,
+                    params_instruction, params_cfg_scale, params_label,
                 ],
             )
             model_dd.change(
@@ -224,14 +246,16 @@ def _build_app(state: AppState, multi_user: bool = False) -> gr.Blocks:
                 outputs=[
                     voice_dd, mapping_df, mapping_label, status_box,
                     params_seed, params_max_iter, params_accent, params_text_sim,
-                    params_temperature, params_cfg_weight, params_label,
+                    params_temperature, params_cfg_weight,
+                    params_instruction, params_cfg_scale, params_label,
                 ],
             )
 
-            def _save_params(voice_id, model_id, seed, max_iter, accent, text_sim, temp, cfg_w, session):
+            def _save_params(voice_id, model_id, seed, max_iter, accent, text_sim,
+                             temp, cfg_w, instr, cfg_sc, session):
                 return callbacks.save_model_voice_params(
                     state, voice_id, model_id, seed, max_iter, accent, text_sim, temp, cfg_w,
-                    session=session,
+                    instruction=instr, cfg_scale=cfg_sc, session=session,
                 )
 
             save_params_btn.click(
@@ -240,6 +264,7 @@ def _build_app(state: AppState, multi_user: bool = False) -> gr.Blocks:
                     voice_dd, model_dd,
                     params_seed, params_max_iter, params_accent, params_text_sim,
                     params_temperature, params_cfg_weight,
+                    params_instruction, params_cfg_scale,
                     session_state,
                 ],
                 outputs=[params_status],
