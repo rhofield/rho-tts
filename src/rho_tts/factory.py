@@ -4,12 +4,12 @@ Factory for creating TTS instances.
 Provides a centralized way to create different TTS provider instances
 with a consistent API. Supports dynamic provider registration.
 """
+import importlib.util
 from typing import Dict, List, Type
 
 from .base_tts import BaseTTS
 from .exceptions import ProviderNotFoundError
 from .provider_info import ProviderInfo, VoiceInfo
-
 
 # Static metadata for isolated providers (avoids subprocess spin-up for metadata)
 _STATIC_PROVIDER_INFO: Dict[str, ProviderInfo] = {
@@ -35,6 +35,14 @@ _STATIC_PROVIDER_INFO: Dict[str, ProviderInfo] = {
         supported_languages=["English"],
         builtin_voices=[
             VoiceInfo(id="default", name="Default", language="English"),
+        ],
+    ),
+    "breeze": ProviderInfo(
+        name="breeze",
+        supports_voice_cloning=True,
+        supported_languages=["English", "Chinese"],
+        builtin_voices=[
+            VoiceInfo(id="design", name="Voice Design (instruction)", language="English"),
         ],
     ),
 }
@@ -70,6 +78,18 @@ class TTSFactory:
             cls._providers["chatterbox"] = ChatterboxTTS
         except ImportError:
             cls._isolated_providers.add("chatterbox")
+
+        # Breeze needs an availability probe rather than a plain import guard:
+        # providers.breeze keeps its heavy imports inside _load_model, so the
+        # module imports fine even where the upstream packages are absent.
+        # ``breeze_infer`` only resolves inside the provisioned venv, where
+        # VenvManager has put the cloned repo on the path — which is also what
+        # stops the worker from recursing into another ProviderProxy.
+        if importlib.util.find_spec("breeze_infer") is not None:
+            from .providers.breeze import BreezeTTS
+            cls._providers["breeze"] = BreezeTTS
+        else:
+            cls._isolated_providers.add("breeze")
 
     @classmethod
     def get_tts_instance(cls, provider: str = "qwen", **kwargs) -> BaseTTS:

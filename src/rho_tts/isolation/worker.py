@@ -53,19 +53,28 @@ logger = logging.getLogger("rho_tts.worker")
 class Worker:
     """Encapsulates the worker state and message loop."""
 
-    def __init__(self):
+    def __init__(self, protocol_out=None):
+        """
+        Args:
+            protocol_out: Stream to write protocol messages to. Defaults to the
+                stdout in effect at construction. ``main()`` passes the real
+                stdout and then points ``sys.stdout`` at stderr, so provider
+                code that prints (Breeze emits model-loading and CUDA-graph
+                progress) cannot corrupt the JSON-line stream.
+        """
         self._tts = None
         self._cancel_token: Optional[CancellationToken] = None
         self._cancel_lock = threading.Lock()
         self._write_lock = threading.Lock()
+        self._protocol_out = protocol_out if protocol_out is not None else sys.stdout
 
     # -- Protocol helpers --------------------------------------------------
 
     def _write(self, msg_type: str, **payload) -> None:
-        """Write a single JSON line to stdout (thread-safe)."""
+        """Write a single JSON line to the protocol stream (thread-safe)."""
         with self._write_lock:
-            sys.stdout.write(encode_message(msg_type, **payload))
-            sys.stdout.flush()
+            self._protocol_out.write(encode_message(msg_type, **payload))
+            self._protocol_out.flush()
 
     # -- Command handlers --------------------------------------------------
 
@@ -265,7 +274,11 @@ class Worker:
 
 
 def main():
-    worker = Worker()
+    # Reserve the real stdout for protocol messages, then send everything else
+    # to stderr: third-party provider code prints to stdout, and one stray line
+    # corrupts the JSON-line stream and surfaces as a bogus "worker crashed".
+    worker = Worker(protocol_out=sys.stdout)
+    sys.stdout = sys.stderr
     worker.run()
 
 
