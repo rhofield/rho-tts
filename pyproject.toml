@@ -45,6 +45,21 @@ chatterbox = [
     "chatterbox-tts",
     "setuptools<82",
 ]
+# Breeze pins its dependencies exactly and is always run in an isolated venv.
+# The upstream package itself is NOT installable from PyPI — it has no
+# packaging metadata — so VenvManager clones it separately (see venv_manager).
+# torchcodec is not declared upstream but is required: torchaudio >= 2.9
+# delegates all I/O to it, and isolation/worker.py calls torchaudio.save.
+breeze = [
+    "torch==2.9.1",
+    "torchaudio==2.9.1",
+    "torchcodec",
+    "transformers==4.57.3",
+    "qwen-tts==0.1.1",
+    "numpy>=2.0",
+    "soundfile>=0.13",
+    "huggingface_hub",
+]
 validation = [
     "faster-whisper>=1.0",
     "resemblyzer>=0.1.3",
@@ -61,6 +76,8 @@ dev = [
     "pytest-cov",
     "ruff",
 ]
+# NOTE: "breeze" is deliberately excluded from [all] — its pins conflict with
+# the other providers, and its model weights are non-commercial licensed.
 all = [
     "rho-tts[qwen,chatterbox,validation,dev,ui]",
 ]

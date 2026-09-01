@@ -141,3 +141,62 @@ class TestWorkerProtocol:
         responses = [json.loads(line) for line in output.strip().split("\n") if line]
         assert responses[0]["type"] == ERROR
         assert "init" in responses[0]["message"].lower()
+
+
+class TestProtocolStreamIsolation:
+    """stdout is the JSON-line protocol channel; stray library prints must not
+    reach it. Regression test: Breeze prints model-loading progress to stdout,
+    which corrupted the stream and surfaced as a bogus 'worker crashed'."""
+
+    def test_write_goes_to_the_explicit_protocol_stream(self):
+        from rho_tts.isolation.worker import Worker
+
+        protocol = io.StringIO()
+        stray = io.StringIO()
+        worker = Worker(protocol_out=protocol)
+
+        with patch("sys.stdout", stray):
+            worker._write("pong")
+            print("stray library output")
+
+        assert '"pong"' in protocol.getvalue()
+        assert "stray" not in protocol.getvalue()
+        assert "stray library output" in stray.getvalue()
+
+    def test_main_redirects_sys_stdout_away_from_protocol(self):
+        """main() must hand the worker the real stdout, then repoint sys.stdout."""
+        from rho_tts.isolation import worker as worker_mod
+
+        real_stdout = io.StringIO()
+        fake_stderr = io.StringIO()
+        captured = {}
+
+        class _StubWorker:
+            def __init__(self, protocol_out=None):
+                captured["protocol_out"] = protocol_out
+
+            def run(self):
+                captured["stdout_during_run"] = worker_mod.sys.stdout
+
+        with patch.object(worker_mod, "Worker", _StubWorker), \
+             patch.object(worker_mod.sys, "stdout", real_stdout), \
+             patch.object(worker_mod.sys, "stderr", fake_stderr):
+            worker_mod.main()
+
+        assert captured["protocol_out"] is real_stdout
+        assert captured["stdout_during_run"] is fake_stderr
+
+    def test_module_import_does_not_mutate_sys_stdout(self):
+        """Importing the worker must be side-effect free — it is imported by
+        tests and tooling, not only by the subprocess entry point."""
+        import subprocess
+        import sys as _sys
+
+        result = subprocess.run(
+            [_sys.executable, "-c",
+             "import sys; before = sys.stdout;"
+             " import rho_tts.isolation.worker;"
+             " print('SAME' if sys.stdout is before else 'MUTATED')"],
+            capture_output=True, text=True, timeout=120,
+        )
+        assert "SAME" in result.stdout, result.stdout + result.stderr

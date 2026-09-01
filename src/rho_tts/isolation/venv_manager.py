@@ -8,7 +8,6 @@ reinstallation on subsequent runs.
 
 import hashlib
 import logging
-import os
 import subprocess
 import sys
 import venv
@@ -20,7 +19,24 @@ logger = logging.getLogger(__name__)
 PROVIDER_EXTRAS: dict[str, str] = {
     "qwen": "qwen",
     "chatterbox": "chatterbox",
+    "breeze": "breeze",
 }
+
+# Providers whose upstream code is not installable from PyPI and must be cloned.
+# Keyed by provider name; the repo is cloned to REPOS_ROOT/<provider> at the
+# pinned commit, then added to the venv's sys.path via a .pth file.
+#
+# breeze-tts ships no pyproject.toml/setup.py — its ``models`` and
+# ``breeze_infer`` packages live at the repo root — so pip cannot install it.
+# The SHA is pinned deliberately: upstream has no tags or releases.
+PROVIDER_REPOS: dict[str, tuple[str, str]] = {
+    "breeze": (
+        "https://github.com/breezeblue-ai/breeze-tts.git",
+        "ca632ce6c4d05f7985da4eab29b1a5d445b43f7b",
+    ),
+}
+
+REPOS_ROOT = Path.home() / ".rho_tts" / "repos"
 
 VENVS_ROOT = Path.home() / ".rho_tts" / "venvs"
 MARKER_FILE = ".rho_tts_installed"
@@ -105,6 +121,10 @@ class VenvManager:
         # Install the package with provider extras
         self._install_package()
 
+        # Clone any non-pip-installable upstream source and expose it
+        if self.provider in PROVIDER_REPOS:
+            self._install_repo()
+
         # Write marker
         marker.write_text(current_hash)
         logger.info("Isolated environment for '%s' is ready", self.provider)
@@ -141,3 +161,57 @@ class VenvManager:
             )
 
         logger.info("Installation complete for '%s'", self.provider)
+
+    # -- Non-pip-installable upstream source ----------------------------------
+
+    def _clone_dir(self) -> Path:
+        """Path the provider's upstream repo is cloned to."""
+        return REPOS_ROOT / self.provider
+
+    def _install_repo(self) -> None:
+        """Clone the provider's upstream repo and put it on the venv's path.
+
+        Used for providers whose upstream ships no packaging metadata. The repo
+        root is added via a .pth file in site-packages rather than by mutating
+        sys.path at import time, so the worker can import the upstream packages
+        normally. This is safe only because each provider gets its own venv —
+        breeze-tts exposes a top-level ``models`` package that would otherwise
+        shadow unrelated code.
+        """
+        url, sha = PROVIDER_REPOS[self.provider]
+        clone = self._clone_dir()
+
+        if not (clone / ".git").is_dir():
+            logger.info("Cloning %s for '%s'...", url, self.provider)
+            clone.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(
+                ["git", "clone", "--quiet", url, str(clone)],
+                check=True, capture_output=True, text=True, timeout=600,
+            )
+
+        # Pin to the recorded commit. Fetch first so a re-pin to a newer SHA works.
+        subprocess.run(
+            ["git", "-C", str(clone), "fetch", "--quiet", "origin"],
+            check=False, capture_output=True, text=True, timeout=600,
+        )
+        result = subprocess.run(
+            ["git", "-C", str(clone), "checkout", "--quiet", sha],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Failed to check out {sha[:8]} of {url} for '{self.provider}'.\n"
+                f"stderr: {result.stderr[-500:]}"
+            )
+
+        self._write_path_file(clone)
+        logger.info("Upstream source for '%s' pinned at %s", self.provider, sha[:8])
+
+    def _write_path_file(self, clone: Path) -> None:
+        """Add *clone* to the venv's import path via a .pth file."""
+        result = subprocess.run(
+            [self.python, "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
+            capture_output=True, text=True, check=True, timeout=60,
+        )
+        site_packages = Path(result.stdout.strip())
+        (site_packages / f"rho_tts_{self.provider}.pth").write_text(f"{clone}\n")
