@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-09-02
+
+### Added
+- **Breeze-TTS-2 provider** (`provider="breeze"`) — voice cloning from a reference audio clip plus its exact transcript, and natural-language voice *design*/*direction* via an `instruction` string (unique among the providers here)
+- `breeze` optional extra pinning the exact torch/transformers versions upstream requires
+- Breeze always runs through the subprocess isolation layer; `VenvManager` provisions its venv and clones the upstream source (breeze-tts ships no packaging metadata, so pip cannot install it)
+- Model weights pinned to an explicit revision so an unpinned snapshot download cannot swap the weights — or the licence — underneath a working install
+- Breeze wired into the Gradio UI, including the instruction field
+
+### Notes
+- `breeze` is deliberately **not** part of the `[all]` extra: its pins conflict with the other providers, and the model weights are under the BreezeBlue Research and Non-Commercial License (upstream code is Apache 2.0). Commercial use requires written authorization from RESONIA, INC.
+
 ## [1.1.4] - 2026-03-28
 
 ### Changed

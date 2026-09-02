@@ -4,7 +4,7 @@ Multi-provider text-to-speech library with voice cloning, accent drift detection
 
 ## Features
 
-- **Multi-provider TTS** — Swap between Qwen3-TTS and Chatterbox with a single parameter
+- **Multi-provider TTS** — Swap between Qwen3-TTS, Chatterbox, and Breeze-TTS-2 with a single parameter
 - **Voice cloning** — Clone any voice from a short reference audio sample
 - **Accent drift detection** — ML classifier catches when the generated voice drifts from your target accent
 - **STT validation** — Whisper-based transcription check ensures the model actually said what you asked it to
@@ -26,12 +26,23 @@ pip install rho-tts[qwen]
 # With Chatterbox provider
 pip install rho-tts[chatterbox]
 
+# With Breeze-TTS-2 provider (always runs in its own isolated venv)
+pip install rho-tts[breeze]
+
 # With validation (accent drift, STT, speaker similarity)
 pip install rho-tts[validation]
 
-# Everything
+# Everything except Breeze
 pip install rho-tts[all]
 ```
+
+> **Breeze is excluded from `[all]` on purpose.** It pins `torch==2.9.1` and
+> `transformers==4.57.3`, which conflict with the other providers, so it is
+> always run through the subprocess isolation layer in its own venv (created
+> automatically under `~/.rho_tts/venvs/breeze/`). Its model weights are also
+> under the BreezeBlue Research and Non-Commercial License — commercial use
+> requires written authorization from RESONIA, INC. The upstream code itself is
+> Apache 2.0.
 
 ### System Dependencies
 
@@ -53,6 +64,7 @@ brew install ffmpeg
 | Qwen3-TTS 0.6B | ~8 GB | Smaller, faster |
 | Qwen3-TTS 1.7B | ~16 GB | Higher quality |
 | Chatterbox | ~6 GB | Good for single segments |
+| Breeze-TTS-2 | ~12 GB | Instruction-driven voice design; 24 kHz output |
 | Validation (Whisper) | ~1 GB | Runs on CPU by default |
 
 ## Quick Start
@@ -115,6 +127,25 @@ tts = TTSFactory.get_tts_instance(
     speaker_similarity_threshold=0.85,
 )
 ```
+
+### Breeze-TTS-2
+
+The only provider that accepts natural-language voice *direction*. Cloning
+requires the reference audio **and its exact transcript**; without a reference
+it designs a voice from the instruction alone.
+
+```python
+tts = TTSFactory.get_tts_instance(
+    provider="breeze",
+    reference_audio="voice.wav",
+    reference_text="The exact words spoken in voice.wav.",
+    instruction="Speak warmly, with a slow, measured pace.",
+    cfg_scale=4.0,  # 1.0 disables instruction steering
+)
+```
+
+The first call provisions the isolated venv and downloads the pinned model
+revision, so expect a long startup; subsequent runs reuse both.
 
 ## Configuration
 
