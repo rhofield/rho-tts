@@ -80,6 +80,7 @@ class BreezeTTS(BaseTTS):
         fast: Enable upstream's compiled fast path. Off by default: it needs a
             torch.compile/CUDA-graph warmup that does not complete on smaller
             GPUs (observed to hang on an RTX 3060).
+        strict_validation: Require working validators and reject audio after failed retries
         max_chars_per_segment: Max characters per text segment
         max_iterations: Maximum validation retry iterations
         accent_drift_threshold: Threshold for accent drift
@@ -101,6 +102,7 @@ class BreezeTTS(BaseTTS):
         cfg_scale: float = 1.0,
         attn_implementation: str = "eager",
         fast: bool = False,
+        strict_validation: bool = False,
         max_chars_per_segment: Optional[int] = None,
         max_iterations: int = 10,
         accent_drift_threshold: float = 0.17,
@@ -130,6 +132,7 @@ class BreezeTTS(BaseTTS):
         self.cfg_scale = cfg_scale
         self.attn_implementation = attn_implementation
         self.fast = fast
+        self.strict_validation = strict_validation
         self.drift_model_path = drift_model_path
 
         self._max_chars_explicit = max_chars_per_segment is not None

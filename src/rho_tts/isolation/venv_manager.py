@@ -60,7 +60,7 @@ def _version_hash() -> str:
     # Fallback: use package version
     try:
         from rho_tts import __version__
-        return hashlib.sha256(__version__.encode()).hexdigest()[:16]
+        return hashlib.sha256((__version__ + ":validation-v1").encode()).hexdigest()[:16]
     except Exception:
         return "unknown"
 
@@ -85,7 +85,7 @@ class VenvManager:
                 f"Supported: {', '.join(PROVIDER_EXTRAS)}"
             )
         self.provider = provider
-        self.extras_key = PROVIDER_EXTRAS[provider]
+        self.extras_key = PROVIDER_EXTRAS[provider] + ",validation"
         self.venv_dir = (venvs_root or VENVS_ROOT) / provider
 
     @property

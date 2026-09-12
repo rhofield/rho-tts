@@ -31,6 +31,7 @@ from .base_tts import BaseTTS
 from .cancellation import CancellationToken, CancelledException
 from .exceptions import (
     AudioGenerationError,
+    ValidationError,
     FormatConversionError,
     ModelLoadError,
     ProviderNotFoundError,
@@ -52,6 +53,7 @@ __all__ = [
     "ProviderNotFoundError",
     "ModelLoadError",
     "AudioGenerationError",
+    "ValidationError",
     "FormatConversionError",
     "__version__",
     "launch_ui",

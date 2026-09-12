@@ -6,6 +6,7 @@ that can be reused across different TTS providers.
 """
 import asyncio
 import logging
+import math
 import os
 import random
 import shutil
@@ -20,7 +21,7 @@ import torch
 import torchaudio
 
 from .cancellation import CancellationToken, CancelledException
-from .exceptions import AudioGenerationError, FormatConversionError
+from .exceptions import AudioGenerationError, FormatConversionError, ValidationError
 from .provider_info import ProviderInfo
 from .result import GenerationResult
 
@@ -35,6 +36,8 @@ DEFAULT_PHONETIC_MAPPING: Dict[str, str] = {}
 
 class BaseTTS(ABC):
     """Abstract base class for TTS implementations."""
+
+    strict_validation = False
 
     MAX_MODEL_CHARS = 3000
     BYTES_PER_CHAR_ESTIMATE = 500_000
@@ -208,6 +211,13 @@ class BaseTTS(ABC):
             drift_prob = predict_accent_drift_probability(
                 audio_path, voice_id=self.voice_id, model_path=self.drift_model_path,
             )
+            if self.strict_validation and (
+                drift_prob is None or not math.isfinite(drift_prob) or not 0 <= drift_prob <= 1
+            ):
+                raise ValidationError(
+                    "Accent drift validation unavailable: check the voice classifier model "
+                    "and install rho-tts[validation] in the provider environment."
+                )
             if drift_prob is None:
                 logger.warning("Accent drift analysis failed (feature extraction error), skipping validation")
                 return 0.0, True
@@ -215,6 +225,8 @@ class BaseTTS(ABC):
             logger.info(f"Accent drift likelihood: {drift_prob:.2f} (threshold: {self.accent_drift_threshold:.2f})")
             return drift_prob, passed
         except ImportError:
+            if self.strict_validation:
+                raise ValidationError("Accent drift validation unavailable: install rho-tts[validation].")
             logger.debug("Accent drift classifier not available, skipping validation")
             return 0.0, True
 
@@ -252,8 +264,12 @@ class BaseTTS(ABC):
             is_accurate, similarity, transcribed = validate_audio_text_match(
                 audio_path, expected_text, self.text_similarity_threshold
             )
+            if self.strict_validation and transcribed is None:
+                raise ValidationError("Transcription validation unavailable: check the speech recognizer logs.")
             return is_accurate, similarity, transcribed
         except ImportError:
+            if self.strict_validation:
+                raise ValidationError("Transcription validation unavailable: install rho-tts[validation].")
             logger.debug("STT validator not available, skipping text validation")
             return True, 1.0, None
 
@@ -797,7 +813,7 @@ class BaseTTS(ABC):
                             continue
 
                         # Skip validation when max_iterations == 1
-                        if self.max_iterations == 1:
+                        if self.max_iterations == 1 and not self.strict_validation:
                             best_audio = audio
                             if getattr(self, 'auto_sort_good_dir', None) or getattr(self, 'auto_sort_bad_dir', None):
                                 # Run drift detection for auto-sort even without validation retries
@@ -871,6 +887,10 @@ class BaseTTS(ABC):
                                 f"({iteration + 1}/{self.max_iterations})"
                             )
                         except Exception as e:
+                            if self.strict_validation:
+                                raise ValidationError(
+                                    f"Segment {seg_idx + 1}: validation error: {e}"
+                                ) from e
                             logger.warning(
                                 f"    Segment {seg_idx + 1}: validation error ({e})"
                             )
@@ -885,6 +905,11 @@ class BaseTTS(ABC):
                         if torch.cuda.is_available():
                             torch.cuda.empty_cache()
                     else:  # for/else: runs when the loop exhausts without a break
+                        if self.strict_validation:
+                            raise ValidationError(
+                                f"Segment {seg_idx + 1} failed speech validation after "
+                                f"{self.max_iterations} attempts; audio was not accepted."
+                            )
                         if best_audio is not None:
                             logger.warning(
                                 f"    Segment {seg_idx + 1}: max iterations reached, "
@@ -933,6 +958,10 @@ class BaseTTS(ABC):
                     break
             else:
                 if final_audio is not None and not is_decay_ok:
+                    if self.strict_validation:
+                        raise ValidationError(
+                            f"Sound decay validation failed after {max_decay_retries} attempts."
+                        )
                     logger.warning(
                         f"  Item {idx + 1}: sound decay persisted after "
                         f"{max_decay_retries} attempt(s) "
@@ -1093,7 +1122,7 @@ class BaseTTS(ABC):
         except CancelledException as e:
             logger.warning(f"Generation cancelled: {e}")
             return None
-        except (FormatConversionError, ValueError):
+        except (FormatConversionError, ValidationError, ValueError):
             raise
         except Exception as e:
             logger.error(f"Error in TTS generation: {e}")

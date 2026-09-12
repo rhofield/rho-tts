@@ -251,8 +251,8 @@ def validate_audio_text_match(
     transcribed = transcribe_audio(audio_path)
 
     if transcribed is None:
-        logger.warning("Transcription failed, skipping text validation")
-        return True, 0.0, None
+        logger.error("Transcription failed; text validation did not pass")
+        return False, 0.0, None
 
     similarity = calculate_text_similarity(expected_text, transcribed)
     is_valid = similarity >= threshold
