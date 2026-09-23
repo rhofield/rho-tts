@@ -3,6 +3,10 @@ JSON-line protocol for main process <-> worker subprocess communication.
 
 Messages are newline-delimited JSON objects sent over stdin/stdout.
 Audio data never crosses this boundary — only file paths.
+
+Generation/stream error responses may include ``error_type="ValidationError"``
+so callers can catch required speech-validation failures. Missing or unknown
+error types retain the legacy behavior; messages remain human-readable strings.
 """
 
 import json

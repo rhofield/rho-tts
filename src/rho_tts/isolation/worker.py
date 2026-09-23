@@ -23,6 +23,7 @@ import threading
 from typing import Optional
 
 from rho_tts.cancellation import CancellationToken
+from rho_tts.exceptions import ValidationError
 from rho_tts.factory import TTSFactory
 from rho_tts.isolation.protocol import (
     CANCEL,
@@ -152,7 +153,7 @@ class Worker:
                 self._write(CANCELLED)
             else:
                 logger.error("generate failed: %s", exc)
-                self._write(ERROR, message=str(exc))
+                self._write_generation_error(exc)
         finally:
             with self._cancel_lock:
                 self._cancel_token = None
@@ -200,10 +201,16 @@ class Worker:
                 self._write(CANCELLED)
             else:
                 logger.error("stream failed: %s", exc)
-                self._write(ERROR, message=str(exc))
+                self._write_generation_error(exc)
         finally:
             with self._cancel_lock:
                 self._cancel_token = None
+
+    def _write_generation_error(self, exc: Exception) -> None:
+        payload = {"message": str(exc)}
+        if isinstance(exc, ValidationError):
+            payload["error_type"] = "ValidationError"
+        self._write(ERROR, **payload)
 
     # -- Main loop ---------------------------------------------------------
 
