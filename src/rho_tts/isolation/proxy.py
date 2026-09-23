@@ -13,6 +13,7 @@ import tempfile
 import threading
 from typing import Generator, List, Optional, Union
 
+from ..exceptions import ValidationError
 from .process_manager import WorkerProcess
 from .protocol import (
     CANCELLED,
@@ -140,6 +141,8 @@ class ProviderProxy:
             return None
         elif resp.get("type") == ERROR:
             self._cleanup_temp(temp_dir)
+            if resp.get("error_type") == "ValidationError":
+                raise ValidationError(resp.get("message", "Speech validation failed"))
             raise RuntimeError(f"Worker error: {resp.get('message')}")
         else:
             self._cleanup_temp(temp_dir)
@@ -260,6 +263,8 @@ class ProviderProxy:
                 elif resp_type == CANCELLED:
                     break
                 elif resp_type == ERROR:
+                    if resp.get("error_type") == "ValidationError":
+                        raise ValidationError(resp.get("message", "Speech validation failed"))
                     break
         finally:
             cancel_stop.set()

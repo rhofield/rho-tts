@@ -26,6 +26,10 @@ class AudioGenerationError(RhoTTSError):
     pass
 
 
+class ValidationError(AudioGenerationError):
+    """Required speech validation failed or could not run."""
+
+
 class FormatConversionError(RhoTTSError):
     """Raised when audio format conversion fails."""
     pass

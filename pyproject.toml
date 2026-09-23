@@ -60,6 +60,7 @@ breeze = [
     "soundfile>=0.13",
     "huggingface_hub",
 ]
+# Isolated providers install this extra alongside their synthesis dependencies.
 validation = [
     "faster-whisper>=1.0",
     "resemblyzer>=0.1.3",
