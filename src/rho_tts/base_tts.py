@@ -21,6 +21,7 @@ import torch
 import torchaudio
 
 from .cancellation import CancellationToken, CancelledException
+from .continuity import ContinuityConfig, ContinuityValidator
 from .exceptions import AudioGenerationError, FormatConversionError, ValidationError
 from .provider_info import ProviderInfo
 from .result import GenerationResult
@@ -726,6 +727,7 @@ class BaseTTS(ABC):
         texts: list[str],
         cancellation_token: CancellationToken,
         progress_callback: Optional[Callable[[str], None]] = None,
+        continuity: Optional[ContinuityConfig] = None,
     ) -> list[Optional[Tuple[torch.Tensor, int, dict]]]:
         """Core generation pipeline: phonetic mapping, segmentation, generation,
         validation, and segment joining.
@@ -734,6 +736,8 @@ class BaseTTS(ABC):
             List of (audio_tensor, segment_count) per text item, or None for failures.
         """
         token = cancellation_token
+        token.raise_if_cancelled()
+        validator = ContinuityValidator(continuity) if continuity is not None else None
         mapped_texts = [self._apply_phonetic_mapping(text) for text in texts]
         results: list[Optional[Tuple[torch.Tensor, int]]] = []
 
@@ -754,7 +758,11 @@ class BaseTTS(ABC):
             decay_ratio = 0.0
             is_decay_ok = True
 
+            item_predecessor = validator.previous if validator else None
             for decay_attempt in range(max_decay_retries):
+                if validator:
+                    validator.previous = item_predecessor
+                continuity_segments = []
                 if decay_attempt > 0:
                     self.seed = int(time.time() * 1000) % 100000
                     logger.warning(
@@ -782,6 +790,11 @@ class BaseTTS(ABC):
                     best_drift = float('inf')
                     best_text_sim = None
                     last_audio = None
+                    best_score = float("inf")
+                    best_features = None
+                    selected_attempt = None
+                    selected_comparison = None
+                    attempts = []
 
                     for iteration in range(self.max_iterations):
                         if token.is_cancelled():
@@ -791,7 +804,7 @@ class BaseTTS(ABC):
                             )
 
                         if iteration > 0:
-                            self.seed = int(time.time() * 1000) % 100000
+                            self.seed = (self.seed + 1) % (2**32)
                             self._set_seeds()
 
                         logger.info(f"    Iteration {iteration + 1}: seed {self.seed}")
@@ -813,7 +826,7 @@ class BaseTTS(ABC):
                             continue
 
                         # Skip validation when max_iterations == 1
-                        if self.max_iterations == 1 and not self.strict_validation:
+                        if self.max_iterations == 1 and not self.strict_validation and validator is None:
                             best_audio = audio
                             if getattr(self, 'auto_sort_good_dir', None) or getattr(self, 'auto_sort_bad_dir', None):
                                 # Run drift detection for auto-sort even without validation retries
@@ -845,7 +858,7 @@ class BaseTTS(ABC):
                             drift_prob, is_voice_ok = self._validate_accent_drift(temp_path)
                             self._auto_sort_audio(temp_path, drift_prob)
 
-                            if drift_prob < best_drift:
+                            if validator is None and drift_prob < best_drift:
                                 best_drift = drift_prob
                                 best_audio = audio.clone()
                                 logger.info(f"      New best: drift {best_drift:.3f}")
@@ -857,7 +870,8 @@ class BaseTTS(ABC):
                                 is_text_ok, text_sim, transcribed = self._validate_text_match(
                                     temp_path, segment
                                 )
-                                best_text_sim = text_sim
+                                if validator is None:
+                                    best_text_sim = text_sim
                                 logger.info(
                                     f"      Text similarity: {text_sim:.3f} "
                                     f"(threshold: {self.text_similarity_threshold})"
@@ -868,7 +882,29 @@ class BaseTTS(ABC):
                                     except Exception as e:
                                         logger.debug(f"Could not compute text diff: {e}")
 
-                            if is_voice_ok and is_text_ok:
+                            continuity_ok = True
+                            if validator:
+                                if token.is_cancelled():
+                                    raise CancelledException("Cancelled before continuity validation")
+                                comparison, features = validator.evaluate(audio, self.sample_rate)
+                                if token.is_cancelled():
+                                    raise CancelledException("Cancelled after continuity validation")
+                                continuity_ok = comparison["passed"]
+                                attempts.append(dict(comparison, attempt=iteration + 1,
+                                                     voice_passed=is_voice_ok, text_passed=is_text_ok))
+                                # Prefer candidates passing the existing validators, then
+                                # rank by continuity deficit; preserve earliest ties.
+                                score = (int(not (is_voice_ok and is_text_ok)), comparison["score"], drift_prob)
+                                if selected_attempt is None or score < best_score:
+                                    best_score = score
+                                    best_audio = audio.clone()
+                                    best_drift = drift_prob
+                                    best_text_sim = text_sim
+                                    best_features = features
+                                    selected_attempt = iteration + 1
+                                    selected_comparison = attempts[-1]
+
+                            if is_voice_ok and is_text_ok and continuity_ok:
                                 logger.info(
                                     f"    Segment {seg_idx + 1} valid after "
                                     f"{iteration + 1} iteration(s)"
@@ -879,6 +915,8 @@ class BaseTTS(ABC):
                             reasons = []
                             if not is_voice_ok:
                                 reasons.append(f"drift={drift_prob:.3f}")
+                            if not continuity_ok:
+                                reasons.append("audio continuity")
                             if not is_text_ok:
                                 reasons.append(f"text={text_sim:.3f}")
                             logger.warning(
@@ -886,8 +924,10 @@ class BaseTTS(ABC):
                                 f"{', '.join(reasons)}, retrying "
                                 f"({iteration + 1}/{self.max_iterations})"
                             )
+                        except (CancelledException, ValidationError):
+                            raise
                         except Exception as e:
-                            if self.strict_validation:
+                            if self.strict_validation or validator is not None:
                                 raise ValidationError(
                                     f"Segment {seg_idx + 1}: validation error: {e}"
                                 ) from e
@@ -905,7 +945,7 @@ class BaseTTS(ABC):
                         if torch.cuda.is_available():
                             torch.cuda.empty_cache()
                     else:  # for/else: runs when the loop exhausts without a break
-                        if self.strict_validation:
+                        if self.strict_validation or (continuity is not None and not continuity.allow_fallback):
                             raise ValidationError(
                                 f"Segment {seg_idx + 1} failed speech validation after "
                                 f"{self.max_iterations} attempts; audio was not accepted."
@@ -922,6 +962,18 @@ class BaseTTS(ABC):
                                 f"returning last audio"
                             )
 
+                    if validator:
+                        if best_features is None:
+                            raise ValidationError(f"Segment {seg_idx + 1}: no continuity-validated candidate")
+                        validator.previous = best_features
+                        continuity_segments.append(dict(
+                            segment=seg_idx + 1, attempts=attempts,
+                            selected_attempt=selected_attempt,
+                            passed=selected_comparison["passed"],
+                            fallback=not all((selected_comparison["voice_passed"],
+                                              selected_comparison["text_passed"],
+                                              selected_comparison["passed"])),
+                        ))
                     if best_audio is not None:
                         audio_segments.append(best_audio)
                         if best_drift != float('inf'):
@@ -975,6 +1027,11 @@ class BaseTTS(ABC):
                 continue
 
             metadata = {}
+            if validator:
+                metadata["continuity"] = dict(
+                    passed=all(segment["passed"] for segment in continuity_segments),
+                    segments=continuity_segments,
+                )
             if item_drift_scores:
                 metadata["drift_prob"] = max(item_drift_scores)
             if item_text_sim_scores:
@@ -995,6 +1052,7 @@ class BaseTTS(ABC):
         speed: float = 1.0,
         pitch_semitones: float = 0.0,
         progress_callback: Optional[Callable[[str], None]] = None,
+        continuity: Optional[ContinuityConfig] = None,
     ) -> Union[Optional[GenerationResult], Optional[List[Optional[GenerationResult]]]]:
         """
         Generate audio from text.
@@ -1016,6 +1074,9 @@ class BaseTTS(ABC):
             format: Output audio format ("wav", "mp3", "flac", "ogg").
             speed: Playback speed multiplier (1.0 = unchanged).
             pitch_semitones: Pitch shift in semitones (0.0 = unchanged).
+            continuity: Optional adjacent-segment validation context. Uses max_iterations
+                for retries and returns evidence in GenerationResult.continuity.
+                Measurements precede joining, post-processing, and speed/pitch changes.
 
         Returns:
             * Single string mode: ``GenerationResult``, or ``None`` on failure.
@@ -1034,7 +1095,8 @@ class BaseTTS(ABC):
         try:
             token = cancellation_token or CancellationToken()
 
-            pipeline_results = self._run_pipeline(texts, token, progress_callback)
+            context = {"continuity": continuity} if continuity is not None else {}
+            pipeline_results = self._run_pipeline(texts, token, progress_callback, **context)
 
             output_results: list[Optional[GenerationResult]] = []
 
@@ -1066,6 +1128,7 @@ class BaseTTS(ABC):
                     drift_prob=metadata.get("drift_prob"),
                     text_similarity=metadata.get("text_similarity"),
                     decay_ratio=metadata.get("decay_ratio"),
+                    continuity=metadata.get("continuity"),
                 )
 
                 # Save to disk if output_path provided
@@ -1140,6 +1203,7 @@ class BaseTTS(ABC):
         speed: float = 1.0,
         pitch_semitones: float = 0.0,
         progress_callback: Optional[Callable[[str], None]] = None,
+        continuity: Optional[ContinuityConfig] = None,
     ) -> Union[Optional[GenerationResult], Optional[List[Optional[GenerationResult]]]]:
         """Async wrapper around generate(). Runs inference in a thread executor."""
         loop = asyncio.get_running_loop()
@@ -1153,6 +1217,7 @@ class BaseTTS(ABC):
                 speed=speed,
                 pitch_semitones=pitch_semitones,
                 progress_callback=progress_callback,
+                continuity=continuity,
             ),
         )
 

@@ -354,3 +354,51 @@ token.cancel()
 ## License
 
 MIT
+
+### Consistent narration across segments
+
+Install `rho-tts[validation]` to enable optional speaker and speech-level checks.
+Breeze's isolated environment already includes these dependencies.
+
+```python
+from rho_tts import ContinuityConfig, TTSFactory
+
+tts = TTSFactory.get_tts_instance(provider="breeze", max_iterations=3)
+first = tts.generate("First passage.", "first.wav", continuity=ContinuityConfig())
+second = tts.generate(
+    "Next passage.", "second.wav",
+    continuity=ContinuityConfig(previous_audio=first.path),
+)
+if second is not None and not second.continuity["passed"]:
+    print("Closest available voice selected; review the audio", second.continuity)
+```
+
+`continuity` is explicit per-call context, supported by `generate` and
+`async_generate`, including isolated providers. Without it, continuity validation
+is disabled. With it, internal text segments and successive list items form one
+sequence; start another call without `previous_audio` to start a new sequence.
+The provider never remembers a predecessor across calls. Streaming does not yet
+accept continuity context.
+
+Speaker cosine similarity defaults to at least 0.75, and active-speech RMS level
+may differ by at most 6 dB. Quiet frames are excluded so trailing silence does not
+lower the measured level. These are initial heuristics, not calibrated perceptual
+guarantees. Measurements apply to synthesized segments before joining,
+post-processing, and speed/pitch transforms, not to final mastered audio.
+An adjacent comparison also cannot rule out gradual drift over a long sequence.
+
+Continuity, accent, and text checks share `max_iterations` per segment, within
+each existing sound-decay retry pass. Retries advance the seed inside the actual
+provider, including when isolated. Candidates passing accent/text checks are
+preferred, then ranked by normalized continuity deficit and accent drift.
+After exhaustion, `allow_fallback=True` returns the best available candidate.
+Set `ContinuityConfig(allow_fallback=False)` to reject exhaustion;
+`strict_validation=True` on the provider always rejects it. Missing validators,
+invalid features, unreadable references, or undetectable speech raise
+`ValidationError` even when fallback is enabled.
+
+`GenerationResult.continuity` contains `passed` and a `segments` list. Each segment
+records its numbered attempts, measurements, existing-validator verdicts,
+`selected_attempt`, `passed` (continuity only), and `fallback` (any validation
+failed). Cancellation retains the existing `None` return convention. Applications
+own sequence ordering, cache invalidation, persistence of evidence, and warning UI.
