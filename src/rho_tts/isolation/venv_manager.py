@@ -140,8 +140,9 @@ class VenvManager:
             cmd = [self.python, "-m", "pip", "install", "-e", f"{project_root}[{self.extras_key}]"]
         else:
             # Packaged install — install from PyPI
-            install_spec = f"rho-tts[{self.extras_key}]"
-            cmd = [self.python, "-m", "pip", "install", f"rho-tts[{self.extras_key}]"]
+            from rho_tts import __version__
+            install_spec = f"rho-tts[{self.extras_key}]=={__version__}"
+            cmd = [self.python, "-m", "pip", "install", install_spec]
 
         logger.info("Installing %s (this may take a few minutes)...", install_spec)
 
