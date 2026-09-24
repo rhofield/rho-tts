@@ -863,8 +863,8 @@ class BaseTTS(ABC):
                                 best_audio = audio.clone()
                                 logger.info(f"      New best: drift {best_drift:.3f}")
 
-                            is_text_ok = True
-                            text_sim = 1.0
+                            is_text_ok = None
+                            text_sim = None
 
                             if is_voice_ok:
                                 is_text_ok, text_sim, transcribed = self._validate_text_match(
@@ -917,7 +917,7 @@ class BaseTTS(ABC):
                                 reasons.append(f"drift={drift_prob:.3f}")
                             if not continuity_ok:
                                 reasons.append("audio continuity")
-                            if not is_text_ok:
+                            if is_text_ok is False:
                                 reasons.append(f"text={text_sim:.3f}")
                             logger.warning(
                                 f"    Segment {seg_idx + 1} invalid: "

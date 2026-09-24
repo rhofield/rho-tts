@@ -400,5 +400,7 @@ invalid features, unreadable references, or undetectable speech raise
 `GenerationResult.continuity` contains `passed` and a `segments` list. Each segment
 records its numbered attempts, measurements, existing-validator verdicts,
 `selected_attempt`, `passed` (continuity only), and `fallback` (any validation
-failed). Cancellation retains the existing `None` return convention. Applications
-own sequence ordering, cache invalidation, persistence of evidence, and warning UI.
+failed). `text_passed` is `None` when an accent failure skips text validation;
+the selected candidate has no text similarity score if its check was skipped.
+Cancellation retains the existing `None` return convention. Applications own
+sequence ordering, cache invalidation, persistence of evidence, and warning UI.
