@@ -11,6 +11,7 @@ import logging
 import os
 import tempfile
 import threading
+from dataclasses import asdict
 from typing import Generator, List, Optional, Union
 
 from ..exceptions import ValidationError
@@ -91,6 +92,7 @@ class ProviderProxy:
         speed: float = 1.0,
         pitch_semitones: float = 0.0,
         progress_callback=None,
+        continuity=None,
     ):
         """Generate audio. Accepts a single string or list of strings.
 
@@ -121,6 +123,7 @@ class ProviderProxy:
                     format=format,
                     speed=speed,
                     pitch_semitones=pitch_semitones,
+                    **({"continuity": asdict(continuity)} if continuity is not None else {}),
                 )
             else:
                 resp = self._worker.send(
@@ -130,6 +133,7 @@ class ProviderProxy:
                     format=format,
                     speed=speed,
                     pitch_semitones=pitch_semitones,
+                    **({"continuity": asdict(continuity)} if continuity is not None else {}),
                 )
         finally:
             cancel_stop.set()
@@ -163,6 +167,7 @@ class ProviderProxy:
                 duration_sec=resp.get("duration_sec", 0.0),
                 segments_count=resp.get("segments_count", 0),
                 format=resp.get("format", "wav"),
+                continuity=resp.get("continuity"),
             )
 
             if use_temp and result_path:
@@ -188,6 +193,7 @@ class ProviderProxy:
                     duration_sec=durations[i] if i < len(durations) else 0.0,
                     segments_count=seg_counts[i] if i < len(seg_counts) else 0,
                     format=resp.get("format", "wav"),
+                    continuity=(resp.get("continuities") or [None] * len(output_paths))[i],
                 )
                 if use_temp:
                     r.audio = self._load_audio_tensor(path)
@@ -279,6 +285,7 @@ class ProviderProxy:
         speed: float = 1.0,
         pitch_semitones: float = 0.0,
         progress_callback=None,
+        continuity=None,
     ):
         """Async wrapper around generate()."""
         loop = asyncio.get_running_loop()
@@ -291,6 +298,8 @@ class ProviderProxy:
                 format=format,
                 speed=speed,
                 pitch_semitones=pitch_semitones,
+                continuity=continuity,
+                progress_callback=progress_callback,
             ),
         )
 

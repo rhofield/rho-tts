@@ -104,12 +104,16 @@ class Worker:
         token = self._cancel_token
 
         try:
+            from ..continuity import ContinuityConfig
+            context = ({"continuity": ContinuityConfig(**msg["continuity"])}
+                       if msg.get("continuity") is not None else {})
             result = self._tts.generate(
                 texts, output_path,
                 cancellation_token=token,
                 format=fmt,
                 speed=speed,
                 pitch_semitones=pitch_semitones,
+                **context,
             )
             if token.is_cancelled():
                 self._write(CANCELLED)
@@ -124,6 +128,7 @@ class Worker:
                     duration_sec=result.duration_sec,
                     segments_count=result.segments_count,
                     format=result.format,
+                    continuity=result.continuity,
                 )
             elif isinstance(result, list):
                 # List of GenerationResult
@@ -144,6 +149,7 @@ class Worker:
                     output_paths=paths,
                     durations=durations,
                     seg_counts=seg_counts,
+                    continuities=[r.continuity if r is not None else None for r in result],
                     format=fmt,
                 )
             else:

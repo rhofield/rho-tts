@@ -25,17 +25,18 @@ Context manager:
         result = tts.generate("Hello world!", "output.wav")
 """
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 from .base_tts import BaseTTS
 from .cancellation import CancellationToken, CancelledException
+from .continuity import ContinuityConfig
 from .exceptions import (
     AudioGenerationError,
-    ValidationError,
     FormatConversionError,
     ModelLoadError,
     ProviderNotFoundError,
     RhoTTSError,
+    ValidationError,
 )
 from .factory import TTSFactory
 from .provider_info import ProviderInfo, VoiceInfo
@@ -43,6 +44,7 @@ from .result import GenerationResult
 
 __all__ = [
     "BaseTTS",
+    "ContinuityConfig",
     "CancellationToken",
     "CancelledException",
     "TTSFactory",
