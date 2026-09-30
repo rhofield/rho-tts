@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.3.2] - Unreleased
+## [1.3.2] - 2026-09-30
 
 ### Added
 - Opt-in `cuda_graph_depth=True` for Breeze's depth decoder. It substantially reduces warm voice-cloning latency on the measured RTX 3060; the first request pays a compilation and capture cost.
