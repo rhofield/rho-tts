@@ -4,8 +4,10 @@ The model itself is never loaded — BreezeTTS._load_model is patched out — so
 these run without the isolated venv, the ~7 GB of weights, or a GPU.
 """
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
 import pytest
 
 from rho_tts.factory import TTSFactory
@@ -52,13 +54,89 @@ class TestBreezeValidation:
         with pytest.raises(ValueError, match="cfg_scale"):
             _make(instruction="x", cfg_scale=bad)
 
-    def test_defaults_to_eager_attention(self):
-        """The shipped config asks for flash_attention_2, which upstream does
-        not install; defaulting to eager keeps a clean install working."""
-        assert _make(instruction="x").attn_implementation == "eager"
+    def test_defaults_to_sdpa_attention(self):
+        assert _make(instruction="x").attn_implementation == "sdpa"
+        assert _make(instruction="x", attn_implementation="eager").attn_implementation == "eager"
 
     def test_fast_path_off_by_default(self):
         assert _make(instruction="x").fast is False
+
+    def test_compiled_depth_is_opt_in_and_excludes_fast_path(self):
+        assert _make(instruction="x").compile_depth is False
+        assert _make(instruction="x", compile_depth=True).compile_depth is True
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            _make(instruction="x", fast=True, compile_depth=True)
+
+    def test_cuda_graph_depth_is_opt_in_and_exclusive(self):
+        assert _make(instruction="x").cuda_graph_depth is False
+        assert _make(instruction="x", cuda_graph_depth=True).cuda_graph_depth is True
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            _make(instruction="x", fast=True, cuda_graph_depth=True)
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            _make(instruction="x", compile_depth=True, cuda_graph_depth=True)
+
+    def test_codec_chunk_frames_range(self):
+        assert _make(instruction="x", codec_chunk_frames=4).codec_chunk_frames == 4
+        assert _make(instruction="x", fast=True).codec_chunk_frames == 1
+        with pytest.raises(ValueError, match="codec_chunk_frames"):
+            _make(instruction="x", fast=True, codec_chunk_frames=4)
+        for value in (0, 17, True, 1.5):
+            with pytest.raises(ValueError, match="codec_chunk_frames"):
+                _make(instruction="x", codec_chunk_frames=value)
+
+
+class TestBreezeStreaming:
+    def test_buffered_generate_still_concatenates_codec_chunks(self):
+        tts = _make(instruction="x")
+        tts._iter_codec_chunks = lambda _text, **_kwargs: iter((
+            SimpleNamespace(audio=np.ones(2, dtype=np.float32)),
+            SimpleNamespace(audio=np.full(3, 2, dtype=np.float32)),
+        ))
+        assert tts._generate_audio("Hello").tolist() == [[1, 1, 2, 2, 2]]
+
+    def test_yields_codec_chunks_before_completion(self):
+        tts = _make(instruction="x")
+        tts._runtime = SimpleNamespace(sample_rate=24000)
+        produced = []
+
+        def chunks(_text):
+            produced.append("first")
+            yield SimpleNamespace(audio=np.ones(2400, dtype=np.float32))
+            produced.append("second")
+            yield SimpleNamespace(audio=np.ones(1200, dtype=np.float32))
+
+        tts._iter_codec_chunks = chunks
+        stream = tts.stream("Hello there.")
+        first = next(stream)
+        assert produced == ["first"]
+        assert first.duration_sec == 0.1
+        second = next(stream)
+        assert produced == ["first", "second"]
+        assert second.duration_sec == 0.05
+        with pytest.raises(StopIteration):
+            next(stream)
+
+    def test_cancellation_closes_upstream_iterator(self):
+        from rho_tts.cancellation import CancellationToken
+
+        tts = _make(instruction="x")
+        tts._runtime = SimpleNamespace(sample_rate=24000)
+        closed = []
+
+        def chunks(_text):
+            try:
+                yield SimpleNamespace(audio=np.ones(2400, dtype=np.float32))
+                yield SimpleNamespace(audio=np.ones(2400, dtype=np.float32))
+            finally:
+                closed.append(True)
+
+        tts._iter_codec_chunks = chunks
+        token = CancellationToken()
+        stream = tts.stream("Hello there.", cancellation_token=token)
+        next(stream)
+        token.cancel()
+        assert list(stream) == []
+        assert closed == [True]
 
 
 class TestBreezeTemplateSelection:

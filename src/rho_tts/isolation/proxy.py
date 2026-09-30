@@ -210,9 +210,19 @@ class ProviderProxy:
     def _load_audio_tensor(self, path):
         """Load audio from a file path into a torch tensor."""
         try:
-            import torchaudio
-            audio, sr = torchaudio.load(path)
-            return audio.squeeze(0)
+            import torch
+            try:
+                import soundfile as sf
+            except ImportError:
+                # The parent package may have only the core dependencies.
+                # Breeze's extra includes SoundFile, but other providers may not.
+                import torchaudio
+
+                audio, _ = torchaudio.load(path)
+                return audio.squeeze(0)
+            else:
+                audio, _ = sf.read(path, dtype="float32", always_2d=True)
+                return torch.from_numpy(audio.T.copy()).squeeze(0)
         except Exception:
             return None
 

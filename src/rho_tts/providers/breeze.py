@@ -23,7 +23,9 @@ from typing import Dict, List, Optional, Union
 import torch
 
 from ..base_tts import BaseTTS
+from ..cancellation import CancellationToken
 from ..provider_info import ProviderInfo, VoiceInfo
+from ..result import GenerationResult
 
 logger = logging.getLogger(__name__)
 
@@ -72,14 +74,24 @@ class BreezeTTS(BaseTTS):
             voice design, or alongside a reference for voice direction.
         cfg_scale: Classifier-free guidance strength for ``instruction``.
             1.0 disables steering; upstream recommends ~4.0 when instructing.
-        attn_implementation: Attention backend. Defaults to "eager" because the
-            shipped config requests flash_attention_2 while upstream's
-            requirements.txt does not install flash-attn. Set to
-            "flash_attention_2" on a GPU where it is available — the result is
-            numerically identical, only faster.
+        attn_implementation: Attention backend. Defaults to PyTorch "sdpa",
+            which uses fused attention kernels on supported GPUs without the
+            optional flash-attn package. Set to "eager" for comparison or if
+            the device does not support SDPA.
         fast: Enable upstream's compiled fast path. Off by default: it needs a
             torch.compile/CUDA-graph warmup that does not complete on smaller
             GPUs (observed to hang on an RTX 3060).
+        compile_depth: Compile depth-decoder layers with torch.compile while
+            retaining the eager runtime. First use pays a compilation cost;
+            useful for long-lived workers serving repeated requests.
+        cuda_graph_depth: Compile and capture only the depth-decoder loop as a
+            CUDA Graph. First use pays compilation and graph-capture costs;
+            useful for long-lived workers with repeated decoder frames.
+        triton_depth_sampling: Use a fused Triton top-50 sampler in the eager
+            depth loop. Requires CUDA and Triton; changes seeded token output.
+        codec_chunk_frames: Codec frames decoded per streamed chunk (1–16).
+            The default is 2; smaller values reduce first-audio latency but
+            may increase total generation time.
         strict_validation: Require working validators and reject audio after failed retries
         max_chars_per_segment: Max characters per text segment
         max_iterations: Maximum validation retry iterations
@@ -100,7 +112,7 @@ class BreezeTTS(BaseTTS):
         reference_text: Optional[str] = None,
         instruction: Optional[str] = None,
         cfg_scale: float = 1.0,
-        attn_implementation: str = "eager",
+        attn_implementation: str = "sdpa",
         fast: bool = False,
         strict_validation: bool = False,
         max_chars_per_segment: Optional[int] = None,
@@ -109,6 +121,10 @@ class BreezeTTS(BaseTTS):
         text_similarity_threshold: float = 0.85,
         drift_model_path: Optional[str] = None,
         phonetic_mapping: Optional[Dict[str, str]] = None,
+        compile_depth: bool = False,
+        cuda_graph_depth: bool = False,
+        triton_depth_sampling: bool = False,
+        codec_chunk_frames: int = 2,
     ):
         super().__init__(device, seed, deterministic, phonetic_mapping=phonetic_mapping)
 
@@ -124,6 +140,18 @@ class BreezeTTS(BaseTTS):
             )
         if not cfg_scale > 0:
             raise ValueError(f"cfg_scale must be greater than 0, got {cfg_scale}")
+        if sum((fast, compile_depth, cuda_graph_depth)) > 1:
+            raise ValueError("fast, compile_depth, and cuda_graph_depth are mutually exclusive")
+        if triton_depth_sampling and (fast or cuda_graph_depth or not str(device).startswith("cuda")):
+            raise ValueError("triton_depth_sampling requires eager CUDA depth decoding")
+        if (
+            isinstance(codec_chunk_frames, bool)
+            or not isinstance(codec_chunk_frames, int)
+            or not 1 <= codec_chunk_frames <= 16
+        ):
+            raise ValueError("codec_chunk_frames must be an integer from 1 to 16")
+        if fast and codec_chunk_frames not in (1, 2):
+            raise ValueError("codec_chunk_frames cannot override the upstream fast codec")
 
         self.reference_audio_path = reference_audio
         self.reference_text = reference_text
@@ -132,6 +160,10 @@ class BreezeTTS(BaseTTS):
         self.cfg_scale = cfg_scale
         self.attn_implementation = attn_implementation
         self.fast = fast
+        self.compile_depth = compile_depth
+        self.cuda_graph_depth = cuda_graph_depth
+        self.triton_depth_sampling = triton_depth_sampling
+        self.codec_chunk_frames = 1 if fast else codec_chunk_frames
         self.strict_validation = strict_validation
         self.drift_model_path = drift_model_path
 
@@ -144,6 +176,7 @@ class BreezeTTS(BaseTTS):
         self.text_similarity_threshold = text_similarity_threshold
 
         self._ref_audio_24k: Optional[str] = None
+        self.reference_resample_device = "none"
         self._load_model()
 
     # -- Model loading --------------------------------------------------------
@@ -191,22 +224,53 @@ class BreezeTTS(BaseTTS):
             str(ckpt / "audio_tokenizer"), device_map=self.device
         )
 
-        self._runtime = FastBreezeStreamingRuntime(
+        from .breeze_sampling import install_eager_topk_sampler
+
+        class ProviderRuntime(FastBreezeStreamingRuntime):
+            def _ensure_graphs(self, *args, **kwargs):
+                super()._ensure_graphs(*args, **kwargs)
+                if not self._fast_depth_decoder:
+                    install_eager_topk_sampler(
+                        self._depth_decoder_graph,
+                        use_triton=provider.triton_depth_sampling,
+                    )
+                    if provider.compile_depth:
+                        provider._compile_depth_decoder(self._depth_decoder_graph)
+
+        provider = self
+        self._runtime = ProviderRuntime(
             self.model,
             self._audio_tokenizer,
             FastStreamingConfig(
                 max_new_tokens=MAX_NEW_TOKENS,
                 max_seq_len=MAX_SEQ_LEN,
                 fast_all=True if self.fast else None,
+                fast_depth_decoder=self.cuda_graph_depth,
                 repetition_penalty=REPETITION_PENALTY,
             ),
             tokenizer=self._tokenizer,
         )
+        if not self.fast:
+            self._runtime._codec_chunk_frames = self.codec_chunk_frames
         if self.fast and self._runtime.fast_enabled:
             self._warmup()
 
         if self.voice_cloning:
             self._ref_audio_24k = self._prepare_reference(self.reference_audio_path)
+
+    @staticmethod
+    def _compile_depth_decoder(graph) -> None:
+        """Compile the repeated depth layers once, without CUDA Graph capture."""
+        if getattr(graph, "_rho_depth_compiled", False):
+            return
+        limit = graph.num_layers * 4 + 16  # separate layer-index guards
+        torch._dynamo.config.cache_size_limit = max(torch._dynamo.config.cache_size_limit, limit)
+        torch._dynamo.config.recompile_limit = max(torch._dynamo.config.recompile_limit, limit)
+        for index, layer in enumerate(graph.depth_model.layers):
+            graph.depth_model.layers[index] = torch.compile(layer, mode="default", fullgraph=True)
+        graph.depth_model.norm = torch.compile(graph.depth_model.norm, mode="default", fullgraph=True)
+        graph.codebooks_head = torch.compile(graph.codebooks_head, mode="default", fullgraph=True)
+        graph._rho_depth_compiled = True
 
     def _apply_generation_config(self) -> None:
         """Apply upstream's generation defaults to the model and depth decoder."""
@@ -237,12 +301,43 @@ class BreezeTTS(BaseTTS):
         import soundfile as sf
         import torchaudio
 
+        from .breeze_schedule import choose_device, reference_resample_costs
+
         data, sr = sf.read(src, dtype="float32", always_2d=True)
         wav = torch.from_numpy(data).T
         if wav.shape[0] > 1:
             wav = wav.mean(dim=0, keepdim=True)
         if sr != SAMPLE_RATE:
-            wav = torchaudio.functional.resample(wav, sr, SAMPLE_RATE)
+            gpu_name = None
+            gpu_free_bytes = 0
+            if str(self.device).startswith("cuda") and torch.cuda.is_available():
+                gpu_name = torch.cuda.get_device_name(self.device)
+                gpu_free_bytes, _ = torch.cuda.mem_get_info(self.device)
+            costs = reference_resample_costs(
+                source_rate=sr,
+                target_rate=SAMPLE_RATE,
+                samples=wav.numel(),
+                gpu_name=gpu_name,
+                gpu_free_bytes=gpu_free_bytes,
+            )
+            selected = choose_device(costs)
+            if selected == "cuda":
+                try:
+                    wav = torchaudio.functional.resample(
+                        wav.to(self.device), sr, SAMPLE_RATE
+                    ).cpu()
+                except torch.cuda.OutOfMemoryError:
+                    logger.warning("Breeze GPU reference resampling ran out of memory; using CPU")
+                    selected = "cpu"
+                    wav = torchaudio.functional.resample(wav, sr, SAMPLE_RATE)
+            else:
+                wav = torchaudio.functional.resample(wav, sr, SAMPLE_RATE)
+            self.reference_resample_device = selected
+            logger.info(
+                "Breeze reference resample on %s (predicted %.2f ms)",
+                selected,
+                costs[selected].predicted_ms,
+            )
 
         fd, path = tempfile.mkstemp(suffix="_ref24k.wav", prefix="rho_breeze_")
         os.close(fd)
@@ -275,11 +370,20 @@ class BreezeTTS(BaseTTS):
             return [self._generate_audio(t, **kwargs) for t in text]
 
         import numpy as np
+
+        chunks = [chunk.audio for chunk in self._iter_codec_chunks(text, **kwargs)]
+        if not chunks:
+            raise RuntimeError(f"Breeze produced no audio for text: {text[:80]!r}")
+
+        audio = np.concatenate(chunks).astype(np.float32)
+        return torch.from_numpy(audio).unsqueeze(0)
+
+    def _iter_codec_chunks(self, text: str, **kwargs):
+        """Prepare one request and yield each decoded codec chunk immediately."""
         from breeze_infer.templates import get_template, prepare_inputs
 
         self._set_seeds()
         request, template_name = self._build_request(text)
-
         inputs = prepare_inputs(
             self._tokenizer,
             self._audio_tokenizer,
@@ -290,16 +394,44 @@ class BreezeTTS(BaseTTS):
             guidance_scale_ref=None,
             guidance_scale_ins=None,
         )
+        yield from self._runtime.iter_audio_chunks(inputs, request_id=request["id"])
 
-        chunks = [
-            chunk.audio
-            for chunk in self._runtime.iter_audio_chunks(inputs, request_id=request["id"])
-        ]
-        if not chunks:
-            raise RuntimeError(f"Breeze produced no audio for text: {text[:80]!r}")
+    def stream(
+        self,
+        text: str,
+        cancellation_token: Optional[CancellationToken] = None,
+        speed: float = 1.0,
+        pitch_semitones: float = 0.0,
+    ):
+        """Yield decoded audio chunks within each text segment as they arrive.
 
-        audio = np.concatenate(chunks).astype(np.float32)
-        return torch.from_numpy(audio).unsqueeze(0)
+        Boundary trimming and fades require the complete utterance, so this
+        low-latency API leaves the codec waveform intact. Speed/pitch adjustment
+        is applied per emitted chunk when requested.
+        """
+        token = cancellation_token or CancellationToken()
+        mapped_text = self._apply_phonetic_mapping(text)
+        segments = self._split_text_into_segments(mapped_text, self._compute_max_chars())
+        for segment in segments:
+            if token.is_cancelled():
+                return
+            iterator = self._iter_codec_chunks(segment)
+            try:
+                for chunk in iterator:
+                    if token.is_cancelled():
+                        return
+                    audio = torch.from_numpy(chunk.audio)
+                    if speed != 1.0 or pitch_semitones != 0.0:
+                        audio = self._apply_speed_pitch(audio, speed, pitch_semitones)
+                    yield GenerationResult(
+                        audio=audio,
+                        sample_rate=self.sample_rate,
+                        duration_sec=audio.numel() / self.sample_rate,
+                        segments_count=1,
+                        format="wav",
+                    )
+            finally:
+                iterator.close()
 
     def close(self) -> None:
         """Release model and free GPU memory."""

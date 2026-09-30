@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.2] - Unreleased
+
+### Added
+- Opt-in `cuda_graph_depth=True` for Breeze's depth decoder. It substantially reduces warm voice-cloning latency on the measured RTX 3060; the first request pays a compilation and capture cost.
+- Opt-in `compile_depth=True` and `triton_depth_sampling=True` for the eager depth path, plus configurable `codec_chunk_frames` and incremental Breeze `stream()` output.
+- Cost-based CPU/GPU selection for Breeze reference resampling.
+
+### Changed
+- Breeze defaults to PyTorch SDPA attention and avoids unnecessary full-vocabulary work for its default eager top-k sampling settings.
+- Isolated streaming WAV handoff uses SoundFile where available, with a Torchaudio read fallback for consumers without SoundFile installed in the parent environment.
+
 ## [1.3.1] - 2026-09-24
 
 ### Added
