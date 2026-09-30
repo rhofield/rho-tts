@@ -147,6 +147,37 @@ tts = TTSFactory.get_tts_instance(
 The first call provisions the isolated venv and downloads the pinned model
 revision, so expect a long startup; subsequent runs reuse both.
 
+`tts.stream(text)` yields decoded Breeze audio chunks as they arrive, including
+within a single sentence. The default codec chunk is two frames (about 160 ms
+of audio). Pass `codec_chunk_frames=1` when first-audio latency matters more
+than total synthesis time; values from 1 to 16 are supported. Streaming
+returns the codec waveform without whole-utterance trimming or fades.
+
+For a long-lived Breeze worker, pass `compile_depth=True` to compile the depth
+decoder on its first request. On the local RTX 3060 this improved steady-state
+voice-cloning latency, but the first request pays a compilation cost. The
+setting is separate from Breeze's `fast=True` CUDA Graph path and cannot be
+used with it.
+
+Pass `cuda_graph_depth=True` to compile and capture only the repeated depth
+decoder. On the same GPU, a warm short voice-cloning request took about 4–5 s
+with this option, versus about 8.5 s with `compile_depth=True`. The first
+request took about 113 s because it compiled and captured both decoder batch
+sizes, so this option is intended for a long-lived worker. It cannot be
+combined with `compile_depth=True` or `fast=True`.
+
+```python
+tts = TTSFactory.get_tts_instance(
+    provider="breeze",
+    reference_audio="voice.wav",
+    reference_text="The exact words spoken in voice.wav.",
+    cuda_graph_depth=True,
+)
+```
+
+The measured voice-cloning path used the default `cfg_scale=1.0`. Keep the
+same `tts` instance for subsequent requests so they reuse the captured graphs.
+
 ## Configuration
 
 All thresholds and parameters can be set via constructor kwargs:

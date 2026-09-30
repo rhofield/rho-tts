@@ -5,8 +5,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from rho_tts.exceptions import ModelLoadError
-from rho_tts.isolation.proxy import ProviderProxy
 from rho_tts.isolation.protocol import CANCELLED, ERROR, READY, RESULT
+from rho_tts.isolation.proxy import ProviderProxy
 
 
 class TestProviderProxy:
@@ -118,6 +118,19 @@ class TestProviderProxy:
         # Even without a real temp file, should return result
         assert result is not None
         assert result.path is None
+
+    def test_audio_load_uses_torchaudio_without_soundfile(self):
+        """Core-only parent installs can still receive isolated audio."""
+        import torch
+
+        proxy, _ = self._make_proxy([{"type": READY, "sample_rate": 24000}])
+        audio = torch.tensor([[0.25, -0.25]])
+        torchaudio = MagicMock()
+        torchaudio.load.return_value = (audio, 24000)
+        with patch.dict("sys.modules", {"soundfile": None, "torchaudio": torchaudio}):
+            result = proxy._load_audio_tensor("sample.wav")
+        assert torch.equal(result, audio.squeeze(0))
+        torchaudio.load.assert_called_once_with("sample.wav")
 
     def test_context_manager(self):
         proxy, worker = self._make_proxy([

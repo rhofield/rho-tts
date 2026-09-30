@@ -187,12 +187,12 @@ class Worker:
                     return
 
                 # Save segment to temp file
-                import torchaudio
+                import soundfile as sf
                 seg_path = os.path.join(temp_dir or tempfile.gettempdir(), f"seg_{seg_idx}.wav")
                 audio = result.audio
-                if audio.dim() == 1:
-                    audio = audio.unsqueeze(0)
-                torchaudio.save(seg_path, audio.cpu(), result.sample_rate)
+                if audio.dim() == 2:
+                    audio = audio.T
+                sf.write(seg_path, audio.detach().cpu().numpy(), result.sample_rate)
 
                 self._write(
                     SEGMENT_RESULT,
