@@ -157,8 +157,22 @@ class ProviderProxy:
     def _retain_delivered_audio(result, path):
         """Keep delivered audio evidence when the transport cleans its temp files."""
         if result.acceptance is not None:
-            retained = os.path.join(tempfile.mkdtemp(prefix='rho_tts_delivered_'), os.path.basename(path))
+            directory = tempfile.mkdtemp(prefix='rho_tts_delivered_')
+            retained = os.path.join(directory, os.path.basename(path))
             shutil.copy2(path, retained)
+            copied = {}
+            segments = list(result.acceptance.get('segments', []))
+            for round_record in result.acceptance.get('rounds', []):
+                segments.extend(round_record.get('segments', []))
+            for segment in segments:
+                for attempt in segment.get('attempts', []):
+                    source = attempt.get('raw_audio')
+                    if source:
+                        destination = os.path.join(directory, 'raw-' + os.path.basename(source))
+                        if source not in copied:
+                            shutil.copy2(source, destination)
+                            copied[source] = destination
+                        attempt['raw_audio'] = copied[source]
             result.acceptance['delivered_audio'] = retained
 
     def _build_results(self, resp, single_mode, use_temp, temp_dir):

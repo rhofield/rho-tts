@@ -725,6 +725,21 @@ class BaseTTS(ABC):
 
     # -- Pipeline extraction ---------------------------------------------------
 
+    def _acceptance_context(self, continuity):
+        from . import __version__
+        settings = {name: getattr(self, name, None) for name in (
+            'max_iterations', 'max_decay_retries', 'strict_validation', 'accent_drift_threshold',
+            'text_similarity_threshold', 'sound_decay_threshold', 'drift_model_path', 'voice_id',
+            'reference_audio_path', 'reference_text', 'attn_implementation', 'fast', 'compile_depth',
+            'cuda_graph_depth', 'codec_chunk_frames', 'deterministic', 'force_sentence_split',
+            'cfg_scale', 'instruction', 'temperature', 'top_p', 'top_k',
+            'crossfade_duration_sec', 'inter_sentence_pause_sec')}
+        if continuity is not None:
+            from dataclasses import asdict
+            settings['continuity'] = asdict(continuity)
+        return dict(settings=settings, provider=type(self).__name__, package_version=__version__,
+                    package_source_hash=hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
+
     def _run_pipeline(
         self,
         texts: list[str],
@@ -741,6 +756,7 @@ class BaseTTS(ABC):
         token = cancellation_token
         token.raise_if_cancelled()
         validator = ContinuityValidator(continuity) if continuity is not None else None
+        acceptance_context = self._acceptance_context(continuity)
         evidence_dir = tempfile.mkdtemp(prefix="rho_tts_evidence_")
         mapped_texts = [self._apply_phonetic_mapping(text) for text in texts]
         results: list[Optional[Tuple[torch.Tensor, int]]] = []
@@ -868,6 +884,12 @@ class BaseTTS(ABC):
                             break
 
                         temp_path = os.path.join(evidence_dir, f"{idx}-{decay_attempt}-{seg_idx}-{iteration}.wav")
+                        drift_prob = None
+                        is_voice_ok = None
+                        is_text_ok = None
+                        text_sim = None
+                        transcribed = None
+                        comparison = None
                         try:
                             save_wav = audio.cpu() if audio.device.type != 'cpu' else audio
                             if save_wav.dim() == 1:
@@ -965,27 +987,24 @@ class BaseTTS(ABC):
                             )
                         except CancelledException:
                             raise
-                        except ValidationError as exc:
+                        except Exception as exc:
                             accepted_attempts.append(dict(attempt=iteration + 1, seed=self.seed,
                                 raw_audio=temp_path, rejection_reasons=[str(exc)],
-                                validators={name: dict(status='unavailable', reason=str(exc))
-                                            for name in ('accent', 'text', 'continuity')}))
-                            acceptance_segments.append(dict(segment=seg_idx + 1, accepted=False,
-                                selected_attempt=None, attempts=accepted_attempts, fallback_reasons=[str(exc)]))
-                            exc.acceptance = dict(accepted=False, rounds=rounds, segments=acceptance_segments)
-                            raise
-                        except Exception as e:
-                            if self.strict_validation or validator is not None:
-                                raise ValidationError(
-                                    f"Segment {seg_idx + 1}: validation error: {e}"
-                                ) from e
-                            accepted_attempts.append(dict(attempt=iteration + 1, seed=self.seed,
-                                raw_audio=temp_path, rejection_reasons=[f'validation error: {e}'],
-                                validators={name: dict(status='unavailable', reason=str(e))
-                                            for name in ('accent', 'text', 'continuity')}))
-                            logger.warning(
-                                f"    Segment {seg_idx + 1}: validation error ({e})"
-                            )
+                                validators=dict(
+                                    accent=dict(status=('pass' if is_voice_ok else 'fail') if drift_prob is not None else 'unavailable', score=drift_prob),
+                                    text=dict(status=('pass' if is_text_ok else 'fail') if transcribed is not None else 'unavailable', score=text_sim, transcript=transcribed),
+                                    continuity=dict(status=('pass' if comparison['passed'] else 'fail') if comparison is not None else 'unavailable', reason=str(exc)),
+                                )))
+                            if isinstance(exc, ValidationError) or self.strict_validation or validator is not None:
+                                acceptance_segments.append(dict(segment=seg_idx + 1, accepted=False,
+                                    selected_attempt=None, attempts=accepted_attempts, fallback_reasons=[str(exc)]))
+                                evidence = dict(**acceptance_context, accepted=False, rounds=rounds, segments=acceptance_segments)
+                                if isinstance(exc, ValidationError):
+                                    exc.acceptance = evidence
+                                    raise
+                                raise ValidationError(f"Segment {seg_idx + 1}: validation error: {exc}",
+                                                      acceptance=evidence) from exc
+                            logger.warning(f"    Segment {seg_idx + 1}: validation error ({exc})")
 
                         del audio
                         if torch.cuda.is_available():
@@ -996,7 +1015,7 @@ class BaseTTS(ABC):
                             raise ValidationError(
                                 f"Segment {seg_idx + 1} failed speech validation after "
                                 f"{self.max_iterations} attempts; audio was not accepted.",
-                                acceptance=dict(accepted=False, rounds=rounds, segments=acceptance_segments + [dict(
+                                acceptance=dict(**acceptance_context, accepted=False, rounds=rounds, segments=acceptance_segments + [dict(
                                     segment=seg_idx + 1, accepted=False, selected_attempt=None,
                                     attempts=accepted_attempts, fallback_reasons=['retries exhausted'])])
                             )
@@ -1025,7 +1044,8 @@ class BaseTTS(ABC):
                             fallback_reasons=['No validated candidate', 'retries exhausted'], attempts=accepted_attempts))
                     if validator:
                         if best_features is None:
-                            raise ValidationError(f"Segment {seg_idx + 1}: no continuity-validated candidate")
+                            raise ValidationError(f"Segment {seg_idx + 1}: no continuity-validated candidate",
+                                acceptance=dict(**acceptance_context, accepted=False, rounds=rounds, segments=acceptance_segments))
                         validator.previous = best_features
                         continuity_segments.append(dict(
                             segment=seg_idx + 1, attempts=attempts,
@@ -1078,7 +1098,7 @@ class BaseTTS(ABC):
                     if self.strict_validation:
                         raise ValidationError(
                             f"Sound decay validation failed after {max_decay_retries} attempts.",
-                            acceptance=dict(accepted=False, rounds=rounds, segments=acceptance_segments,
+                            acceptance=dict(**acceptance_context, accepted=False, rounds=rounds, segments=acceptance_segments,
                                             fallback_reasons=['sound decay failed', 'decay retries exhausted'])
                         )
                     logger.warning(
@@ -1093,24 +1113,12 @@ class BaseTTS(ABC):
                 results.append(None)
                 continue
 
-            settings = {name: getattr(self, name, None) for name in (
-                'max_iterations', 'max_decay_retries', 'strict_validation', 'accent_drift_threshold',
-                'text_similarity_threshold', 'sound_decay_threshold', 'drift_model_path', 'voice_id',
-                'reference_audio_path', 'reference_text', 'attn_implementation',
-                'fast', 'compile_depth', 'cuda_graph_depth', 'codec_chunk_frames', 'deterministic', 'force_sentence_split',
-                'cfg_scale', 'instruction', 'temperature', 'top_p', 'top_k',
-                'crossfade_duration_sec', 'inter_sentence_pause_sec')}
-            if continuity is not None:
-                from dataclasses import asdict
-                settings['continuity'] = asdict(continuity)
-            from . import __version__
             metadata = dict(acceptance=dict(schema_version=1,
                 accepted=all(seg['accepted'] for seg in acceptance_segments) and is_decay_ok
                          and rounds[-1]['post_processing']['status'] == 'pass',
                 segments=acceptance_segments, rounds=rounds, selected_round=decay_attempt + 1,
                 validators=dict(sound_decay=rounds[-1].get('sound_decay', dict(status='unavailable'))),
-                settings=settings, provider=type(self).__name__, package_version=__version__,
-                package_source_hash=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                **acceptance_context,
                 fallback_reasons=([] if is_decay_ok else ['sound decay failed', 'decay retries exhausted'])
                     + ([] if rounds[-1]['post_processing']['status'] == 'pass' else ['post-processing failed'])))
             if validator:

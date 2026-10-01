@@ -79,3 +79,57 @@ class TestAcceptance(ContinuityHarness):
         monkeypatch.setattr(venv_manager.subprocess, 'run', run)
         venv_manager.VenvManager('breeze', venvs_root=tmp_path)._install_package()
         assert run.call_args.args[0][-1] == 'rho-tts[breeze,validation] @ git+ssh://git@github.com/rhofield/rho-tts.git@abc123'
+
+    @__import__('pytest').mark.parametrize('batch', [False, True])
+    def test_in_memory_ipc_keeps_candidate_and_delivered_audio(self, batch):
+        import io
+        import json
+        from pathlib import Path
+        from rho_tts.isolation.worker import Worker
+        from tests.test_isolation.test_proxy import TestProviderProxy as ProxyHarness
+        output = io.StringIO()
+        worker = Worker(protocol_out=output)
+        worker._tts = self.tts
+        proxy, transport = ProxyHarness()._make_proxy([{'type': 'ready', 'sample_rate': 16000}])
+        def send(kind, **kwargs):
+            output.seek(0)
+            output.truncate()
+            worker._handle_generate(kwargs)
+            return json.loads(output.getvalue())
+        transport.send.side_effect = send
+        candidates(self.tts, [.1, .1] if batch else [.1])
+        results = proxy.generate(['Hello', 'World'] if batch else 'Hello', continuity=ContinuityConfig())
+        for result in results if batch else [results]:
+            assert result.path is None
+            assert result.audio is not None
+            assert Path(result.acceptance['delivered_audio']).is_file()
+            assert all(Path(a['raw_audio']).is_file() for segment in result.acceptance['segments'] for a in segment['attempts'])
+            assert all(Path(a['raw_audio']).is_file() for round_record in result.acceptance['rounds'] for segment in round_record['segments'] for a in segment['attempts'])
+        proxy.close()
+
+    def test_unexpected_validator_error_keeps_evidence_across_ipc(self, monkeypatch, tmp_path):
+        import io
+        import json
+        from pathlib import Path
+        from rho_tts import ValidationError
+        from rho_tts import continuity
+        from rho_tts.isolation.worker import Worker
+        from tests.test_isolation.test_proxy import TestProviderProxy as ProxyHarness
+        import pytest
+        output = io.StringIO()
+        worker = Worker(protocol_out=output)
+        worker._tts = self.tts
+        proxy, transport = ProxyHarness()._make_proxy([{'type': 'ready', 'sample_rate': 16000}])
+        def send(kind, **kwargs):
+            worker._handle_generate(kwargs)
+            return json.loads(output.getvalue())
+        transport.send.side_effect = send
+        monkeypatch.setattr(continuity.ContinuityValidator, 'evaluate', lambda *a: (_ for _ in ()).throw(RuntimeError('encoder broke')))
+        candidates(self.tts, [.1])
+        with pytest.raises(ValidationError, match='encoder broke') as error:
+            proxy.generate('Hello', str(tmp_path / 'out.wav'), continuity=ContinuityConfig())
+        attempt = error.value.acceptance['segments'][0]['attempts'][0]
+        assert attempt['rejection_reasons'] == ['encoder broke']
+        assert Path(attempt['raw_audio']).is_file()
+        assert error.value.acceptance['accepted'] is False
+        proxy.close()
