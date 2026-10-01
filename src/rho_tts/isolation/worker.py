@@ -92,6 +92,18 @@ class Worker:
             logger.error("Init failed: %s", exc)
             self._write(ERROR, message=str(exc))
 
+    def _handle_manifest(self, msg: dict) -> None:
+        try:
+            from ..continuity import ContinuityConfig
+            kwargs = {key: msg[key] for key in ('job_id', 'job_seed', 'format', 'speed', 'pitch_semitones') if key in msg}
+            if msg.get('continuity') is not None:
+                kwargs['continuity'] = ContinuityConfig(**msg['continuity'])
+            manifest = self._tts.generation_manifest(msg['texts'], **kwargs)
+            manifest['worker'] = manifest['package']
+            self._write(RESULT, manifest=manifest)
+        except Exception as exc:
+            self._write(ERROR, message=str(exc))
+
     def _handle_generate(self, msg: dict) -> None:
         texts = msg.get("texts") or msg.get("text")
         output_path = msg.get("output_base_path") or msg.get("output_path")
@@ -107,6 +119,7 @@ class Worker:
             from ..continuity import ContinuityConfig
             context = ({"continuity": ContinuityConfig(**msg["continuity"])}
                        if msg.get("continuity") is not None else {})
+            context.update({key: msg[key] for key in ("job_id", "job_seed") if key in msg})
             result = self._tts.generate(
                 texts, output_path,
                 cancellation_token=token,
@@ -115,6 +128,9 @@ class Worker:
                 pitch_semitones=pitch_semitones,
                 **context,
             )
+            for item in result if isinstance(result, list) else [result]:
+                if item is not None and getattr(item, "acceptance", None) and "manifest" in item.acceptance:
+                    item.acceptance["manifest"]["worker"] = item.acceptance["manifest"]["package"]
             if token.is_cancelled():
                 self._write(CANCELLED)
             elif result is None:
@@ -278,6 +294,8 @@ class Worker:
             if msg_type == SHUTDOWN:
                 logger.info("Shutdown received")
                 break
+            elif msg_type == "manifest":
+                self._handle_manifest(msg)
             elif msg_type == GENERATE:
                 self._handle_generate(msg)
             elif msg_type == STREAM:

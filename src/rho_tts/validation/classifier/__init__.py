@@ -4,6 +4,8 @@ Voice quality classifier for accent drift detection.
 Predicts the probability that a generated audio sample has drifted
 from the target voice/accent.
 """
+import hashlib
+from pathlib import Path
 import logging
 import os
 import warnings
@@ -14,6 +16,7 @@ logger = logging.getLogger(__name__)
 # Per-voice model caches: voice_id -> (model, optimal_threshold)
 _models: Dict[str, object] = {}
 _thresholds: Dict[str, float] = {}
+_model_hashes: Dict[str, Optional[str]] = {}
 
 _DEFAULT_THRESHOLD = 0.18
 
@@ -26,9 +29,6 @@ def get_model_path(voice_id: str) -> str:
 def _load_model(model_path: Optional[str] = None, voice_id: Optional[str] = None):
     """Load the voice quality classifier model into the per-voice cache."""
     cache_key = model_path if model_path is not None else (voice_id or "__global__")
-
-    if cache_key in _models:
-        return
 
     try:
         import joblib
@@ -46,6 +46,14 @@ def _load_model(model_path: Optional[str] = None, voice_id: Optional[str] = None
                 "RHO_TTS_CLASSIFIER_MODEL",
                 os.path.join(os.path.dirname(__file__), "voice_quality_model.pkl"),
             )
+
+    source = Path(model_path)
+    source_hash = hashlib.sha256(source.read_bytes()).hexdigest() if source.is_file() else None
+    if cache_key in _models and _model_hashes.get(cache_key) == source_hash:
+        return
+    _models.pop(cache_key, None)
+    _thresholds.pop(cache_key, None)
+    _model_hashes[cache_key] = source_hash
 
     if not os.path.exists(model_path):
         if voice_id is not None:
