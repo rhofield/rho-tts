@@ -435,3 +435,23 @@ failed). `text_passed` is `None` when an accent failure skips text validation;
 the selected candidate has no text similarity score if its check was skipped.
 Cancellation retains the existing `None` return convention. Applications own
 sequence ordering, cache invalidation, persistence of evidence, and warning UI.
+
+### Acceptance evidence
+
+`GenerationResult.acceptance` separates overall provider acceptance from adjacent
+continuity. Each selected segment includes `pass`, `fail`, or `unavailable` for
+accent, text, and continuity, its selected attempt, and all rejection/fallback
+reasons. Unavailable validation never counts as overall acceptance. Continuity
+without a configured predecessor gate is recorded as unavailable and is not a
+required check. Final sound-decay verdicts and every regeneration round are
+included. Strict validation raises `ValidationError` with `.acceptance` evidence.
+Both successful results and validation failures carry evidence across worker IPC.
+
+Raw attempts are retained beside saved audio under `<output>.evidence/`, with a
+`<output>.acceptance.json` sidecar and the effective provider settings, seeds,
+package version and pipeline source hash. In-memory generation retains raw
+attempts in a `rho_tts_evidence_*` directory; isolated in-memory calls also retain
+WAV copies of delivered audio. These artifacts are deliberately retained for
+review and must be cleaned by the caller when no longer needed. Acceptance covers
+provider validation; later caller padding, joins, or format changes are not new
+speech-validation passes.
