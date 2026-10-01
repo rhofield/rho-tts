@@ -7,6 +7,8 @@ reinstallation on subsequent runs.
 """
 
 import hashlib
+import json
+from importlib.metadata import distribution, PackageNotFoundError
 import logging
 import subprocess
 import sys
@@ -142,6 +144,15 @@ class VenvManager:
             # Packaged install — install from PyPI
             from rho_tts import __version__
             install_spec = f"rho-tts[{self.extras_key}]=={__version__}"
+            # VCS-pinned callers must provision the same source, including
+            # pre-release package changes that are not available on PyPI.
+            try:
+                direct_url = json.loads(distribution('rho-tts').read_text('direct_url.json') or '{}')
+            except (PackageNotFoundError, ValueError):
+                direct_url = {}
+            vcs = direct_url.get('vcs_info', {})
+            if vcs.get('vcs') == 'git' and vcs.get('commit_id'):
+                install_spec = f"rho-tts[{self.extras_key}] @ git+{direct_url['url']}@{vcs['commit_id']}"
             cmd = [self.python, "-m", "pip", "install", install_spec]
 
         logger.info("Installing %s (this may take a few minutes)...", install_spec)

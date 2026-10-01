@@ -66,3 +66,16 @@ class TestAcceptance(ContinuityHarness):
         assert result.acceptance['selected_round'] == 2
         assert [r['sound_decay']['status'] for r in result.acceptance['rounds']] == ['fail', 'pass']
         assert result.acceptance['accepted']
+
+    def test_vcs_caller_provisions_worker_from_same_commit(self, monkeypatch, tmp_path):
+        from rho_tts.isolation import venv_manager
+        from unittest.mock import Mock
+        from types import SimpleNamespace
+        import json
+        monkeypatch.setattr(venv_manager, '_find_project_root', lambda: None)
+        monkeypatch.setattr(venv_manager, 'distribution', lambda name: SimpleNamespace(read_text=lambda name: json.dumps(
+            dict(url='ssh://git@github.com/rhofield/rho-tts.git', vcs_info=dict(vcs='git', commit_id='abc123')))))
+        run = Mock(return_value=Mock(returncode=0))
+        monkeypatch.setattr(venv_manager.subprocess, 'run', run)
+        venv_manager.VenvManager('breeze', venvs_root=tmp_path)._install_package()
+        assert run.call_args.args[0][-1] == 'rho-tts[breeze,validation] @ git+ssh://git@github.com/rhofield/rho-tts.git@abc123'
