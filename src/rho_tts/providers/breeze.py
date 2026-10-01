@@ -236,6 +236,9 @@ class BreezeTTS(BaseTTS):
                     )
                     if provider.compile_depth:
                         provider._compile_depth_decoder(self._depth_decoder_graph)
+                # Graph capture/warmup may sample. Start the actual request at
+                # its recorded attempt seed whether graphs are fresh or reused.
+                provider._set_seeds()
 
         provider = self
         self._runtime = ProviderRuntime(

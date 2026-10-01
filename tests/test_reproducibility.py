@@ -101,3 +101,14 @@ class TestReproducibility:
         assert random.random() == expected[0]
         assert np.random.random() == expected[1]
         assert torch.equal(torch.rand(1), expected[2])
+
+    def test_repeated_job_ignores_ambient_numpy_and_python_state(self):
+        import numpy as np
+        import random
+        tts = FakeTTS()
+        tts._generate_audio = lambda text: torch.from_numpy(np.random.random(16000).astype('float32')) * random.random()
+        first = tts.generate('Hello', job_id='hello', job_seed=99)
+        np.random.seed(892)
+        random.seed(348)
+        repeated = tts.generate('Hello', job_id='hello', job_seed=99)
+        assert torch.equal(first.audio, repeated.audio)

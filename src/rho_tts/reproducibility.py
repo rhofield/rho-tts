@@ -62,7 +62,9 @@ def generation_manifest(provider, texts, *, job_id=None, job_seed=None, continui
     model_identity = dict(repo=getattr(provider_module, 'MODEL_REPO', None),
                           revision=getattr(provider_module, 'MODEL_REVISION', None),
                           config=config.to_dict() if config is not None else None,
-                          decoding=generation.to_dict() if generation is not None else None)
+                          decoding=generation.to_dict() if generation is not None else None,
+                          depth_decoding=(model.depth_decoder.generation_config.to_dict()
+                              if model is not None and hasattr(model, 'depth_decoder') else None))
     constructor: dict[str, Any] = {}
     for name in inspect.signature(type(provider).__init__).parameters:
         if name == 'max_chars_per_segment' and not getattr(provider, '_max_chars_explicit', False):
@@ -120,8 +122,11 @@ def scoped_generation(method):
     def generate(self, texts, *args, job_id=None, job_seed=None, **kwargs):
         if job_seed is not None and (isinstance(job_seed, bool) or not isinstance(job_seed, int) or not 0 <= job_seed < 2**32):
             raise ValueError('job_seed must be an integer in [0, 2**32)')
+        bound = inspect.signature(method).bind(self, texts, *args, **kwargs)
+        bound.apply_defaults()
         job = dict(id=job_id or fingerprint([texts] if isinstance(texts, str) else texts),
-                   seed=self.seed if job_seed is None else job_seed)
+                   seed=self.seed if job_seed is None else job_seed,
+                   delivery={key: bound.arguments[key] for key in ('format', 'speed', 'pitch_semitones')})
         # Backends use process-global generators. Serialize and restore those generators;
         # the seed itself is context-local and never assigned to the shared provider.
         with _rng_lock, torch.random.fork_rng():

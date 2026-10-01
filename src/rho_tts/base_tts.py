@@ -151,9 +151,7 @@ class BaseTTS(ABC):
         seed = _active_seed.get()
         seed = self.seed if seed is None else seed
         random.seed(seed)
-        np.seed = _active_seed.get()
-        seed = self.seed if seed is None else seed
-        random.seed(seed)
+        np.random.seed(seed)
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed(seed)
@@ -766,7 +764,7 @@ class BaseTTS(ABC):
         validator = ContinuityValidator(continuity) if continuity is not None else None
         acceptance_context = self._acceptance_context(continuity)
         job = _active_job.get() or dict(id=fingerprint(texts), seed=self.seed)
-        acceptance_context['manifest'] = self.generation_manifest(texts, job_id=job['id'], job_seed=job['seed'], continuity=continuity)
+        acceptance_context['manifest'] = self.generation_manifest(texts, job_id=job['id'], job_seed=job['seed'], continuity=continuity, **job.get('delivery', {}))
         evidence_dir = tempfile.mkdtemp(prefix="rho_tts_evidence_")
         mapped_texts = [self._apply_phonetic_mapping(text) for text in texts]
         results: list[Optional[Tuple[torch.Tensor, int]]] = []
