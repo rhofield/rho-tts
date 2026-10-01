@@ -88,7 +88,9 @@ class TestContinuity:
         seeds = candidates(tts, [0.8, 0.1])
         result = tts.generate("Hello", continuity=ContinuityConfig(previous_audio=reference(tmp_path)))
         assert len(seeds) == 2
-        assert seeds[1] == seeds[0] + 1
+        attempts = result.acceptance['segments'][0]['attempts']
+        assert attempts[1]['seed'] != attempts[0]['seed']
+        assert tts.seed == 42
         report = result.continuity
         assert report["passed"]
         assert report["segments"][0]["selected_attempt"] == 2

@@ -84,6 +84,19 @@ class ProviderProxy:
             raise RuntimeError("Provider not initialized")
         return self._sample_rate
 
+    def generation_manifest(self, texts, **kwargs):
+        """Resolve configuration in the isolated worker before cache lookup."""
+        from ..reproducibility import package_identity
+        continuity = kwargs.pop("continuity", None)
+        if continuity is not None:
+            kwargs["continuity"] = asdict(continuity)
+        response = self._worker.send("manifest", texts=texts, **kwargs)
+        if response.get("type") != RESULT:
+            raise RuntimeError(response.get("message", "Worker cannot resolve generation manifest"))
+        manifest = response["manifest"]
+        manifest["caller"] = package_identity()
+        return manifest
+
     def generate(
         self,
         texts: Union[str, List[str]],
@@ -94,6 +107,8 @@ class ProviderProxy:
         pitch_semitones: float = 0.0,
         progress_callback=None,
         continuity=None,
+        job_id=None,
+        job_seed=None,
     ):
         """Generate audio. Accepts a single string or list of strings.
 
@@ -124,6 +139,7 @@ class ProviderProxy:
                     format=format,
                     speed=speed,
                     pitch_semitones=pitch_semitones,
+                    **({"job_id": job_id, "job_seed": job_seed} if job_id is not None or job_seed is not None else {}),
                     **({"continuity": asdict(continuity)} if continuity is not None else {}),
                 )
             else:
@@ -134,6 +150,7 @@ class ProviderProxy:
                     format=format,
                     speed=speed,
                     pitch_semitones=pitch_semitones,
+                    **({"job_id": job_id, "job_seed": job_seed} if job_id is not None or job_seed is not None else {}),
                     **({"continuity": asdict(continuity)} if continuity is not None else {}),
                 )
         finally:
@@ -194,6 +211,7 @@ class ProviderProxy:
                 acceptance=resp.get("acceptance"),
             )
 
+            self._record_caller(result)
             if use_temp and result_path:
                 # Read audio into tensor, clean up temp
                 result.audio = self._load_audio_tensor(result_path)
@@ -221,6 +239,7 @@ class ProviderProxy:
                     continuity=(resp.get("continuities") or [None] * len(output_paths))[i],
                     acceptance=(resp.get("acceptances") or [None] * len(output_paths))[i],
                 )
+                self._record_caller(r)
                 if use_temp:
                     r.audio = self._load_audio_tensor(path)
                     self._retain_delivered_audio(r, path)
@@ -233,6 +252,12 @@ class ProviderProxy:
             if all(r is None for r in results):
                 return None
             return results
+
+    @staticmethod
+    def _record_caller(result):
+        from ..reproducibility import package_identity
+        if result.acceptance is not None and "manifest" in result.acceptance:
+            result.acceptance["manifest"]["caller"] = package_identity()
 
     def _load_audio_tensor(self, path):
         """Load audio from a file path into a torch tensor."""
@@ -323,6 +348,8 @@ class ProviderProxy:
         pitch_semitones: float = 0.0,
         progress_callback=None,
         continuity=None,
+        job_id=None,
+        job_seed=None,
     ):
         """Async wrapper around generate()."""
         loop = asyncio.get_running_loop()
@@ -335,7 +362,7 @@ class ProviderProxy:
                 format=format,
                 speed=speed,
                 pitch_semitones=pitch_semitones,
-                continuity=continuity,
+                continuity=continuity, job_id=job_id, job_seed=job_seed,
                 progress_callback=progress_callback,
             ),
         )

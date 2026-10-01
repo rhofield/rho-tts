@@ -455,3 +455,27 @@ WAV copies of delivered audio. These artifacts are deliberately retained for
 review and must be cleaned by the caller when no longer needed. Acceptance covers
 provider validation; later caller padding, joins, or format changes are not new
 speech-validation passes.
+
+### Replayable generation jobs
+
+`generate` and `async_generate` accept `job_id` and `job_seed` (an unsigned
+32-bit integer). Defaults are a content-derived job ID and the configured seed.
+Each item, segment, sound-decay round, and validation attempt receives its own
+SHA-256-derived seed. Retries never change the provider's configured seed. The
+pipeline serializes access to process-global Python, NumPy, and Torch generators
+and restores their states, including CUDA generators, after success or failure.
+
+`tts.generation_manifest(texts, job_id=..., job_seed=..., continuity=...)` resolves
+settings without synthesizing. It works through the isolated worker and records
+model revision/configuration, reference and classifier content hashes, transcript,
+profile/encoder and package/source identities, resolved thresholds and segmentation,
+decoding/execution/processing settings, delivery settings, and predecessor content.
+The generated result's `acceptance['manifest']` records the actual job; individual
+attempt records retain their derived seeds. ProviderProxy adds caller and worker
+package identities. Changes to classifier files also invalidate its in-memory loader.
+
+Matching seeds do **not** guarantee cross-runtime bitwise equivalence. Hardware,
+Torch/CUDA, attention and sampling implementations, model revisions, and compiled
+execution can change outputs. The new seed scheme intentionally changes output
+relative to the former incrementing shared seed. Streaming retains its existing
+API; these job/replay guarantees apply to `generate` and `async_generate`.

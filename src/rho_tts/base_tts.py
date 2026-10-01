@@ -13,7 +13,6 @@ import os
 import random
 import shutil
 import tempfile
-import time
 import traceback
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -28,6 +27,7 @@ from .continuity import ContinuityConfig, ContinuityValidator
 from .exceptions import AudioGenerationError, FormatConversionError, ValidationError
 from .provider_info import ProviderInfo
 from .result import GenerationResult
+from .reproducibility import (_active_seed, _active_job, attempt_seed, scoped_generation, generation_manifest, fingerprint)
 
 logger = logging.getLogger(__name__)
 
@@ -148,12 +148,16 @@ class BaseTTS(ABC):
 
     def _set_seeds(self):
         """Set random seeds for reproducible generation."""
-        random.seed(self.seed)
-        np.random.seed(self.seed)
-        torch.manual_seed(self.seed)
+        seed = _active_seed.get()
+        seed = self.seed if seed is None else seed
+        random.seed(seed)
+        np.seed = _active_seed.get()
+        seed = self.seed if seed is None else seed
+        random.seed(seed)
+        torch.manual_seed(seed)
         if torch.cuda.is_available():
-            torch.cuda.manual_seed(self.seed)
-            torch.cuda.manual_seed_all(self.seed)
+            torch.cuda.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
 
         if self.deterministic:
             torch.backends.cudnn.deterministic = True
@@ -725,6 +729,10 @@ class BaseTTS(ABC):
 
     # -- Pipeline extraction ---------------------------------------------------
 
+    def generation_manifest(self, texts, **kwargs):
+        """Resolve the complete replay configuration without synthesizing audio."""
+        return generation_manifest(self, texts, **kwargs)
+
     def _acceptance_context(self, continuity):
         from . import __version__
         settings = {name: getattr(self, name, None) for name in (
@@ -757,6 +765,8 @@ class BaseTTS(ABC):
         token.raise_if_cancelled()
         validator = ContinuityValidator(continuity) if continuity is not None else None
         acceptance_context = self._acceptance_context(continuity)
+        job = _active_job.get() or dict(id=fingerprint(texts), seed=self.seed)
+        acceptance_context['manifest'] = self.generation_manifest(texts, job_id=job['id'], job_seed=job['seed'], continuity=continuity)
         evidence_dir = tempfile.mkdtemp(prefix="rho_tts_evidence_")
         mapped_texts = [self._apply_phonetic_mapping(text) for text in texts]
         results: list[Optional[Tuple[torch.Tensor, int]]] = []
@@ -767,7 +777,7 @@ class BaseTTS(ABC):
             if token.is_cancelled():
                 raise CancelledException(f"Cancelled during text item {idx}")
 
-            effective_max_chars = self._compute_max_chars()
+            effective_max_chars = acceptance_context["manifest"]["settings"]["resolved_max_chars"]
             segments = self._split_text_into_segments(text, effective_max_chars)
             logger.info(f"Text item {idx + 1}: {len(text)} chars -> {len(segments)} segment(s)")
 
@@ -787,7 +797,6 @@ class BaseTTS(ABC):
                 acceptance_segments = []
                 rounds.append(dict(attempt=decay_attempt + 1, segments=acceptance_segments))
                 if decay_attempt > 0:
-                    self.seed = int(time.time() * 1000) % 100000
                     logger.warning(
                         f"  Item {idx + 1}: sound decay detected, "
                         f"regenerating all segments "
@@ -808,7 +817,6 @@ class BaseTTS(ABC):
                         progress_callback(f"Generating segment {seg_idx + 1}/{len(segments)}...")
 
                     # --- Retry/validation loop ---
-                    self._set_seeds()
                     best_audio = None
                     best_drift = float('inf')
                     best_text_sim = None
@@ -829,11 +837,11 @@ class BaseTTS(ABC):
                                 f"segment {seg_idx + 1}, item {idx + 1}"
                             )
 
-                        if iteration > 0:
-                            self.seed = (self.seed + 1) % (2**32)
-                            self._set_seeds()
+                        seed = attempt_seed(job["seed"], job["id"], idx, seg_idx, decay_attempt, iteration)
+                        _active_seed.set(seed)
+                        self._set_seeds()
 
-                        logger.info(f"    Iteration {iteration + 1}: seed {self.seed}")
+                        logger.info(f"    Iteration {iteration + 1}: seed {seed}")
 
                         try:
                             audio = self._generate_audio(segment)
@@ -845,19 +853,19 @@ class BaseTTS(ABC):
                                 logger.error(f"    Segment {seg_idx + 1} OOM: {e}")
                                 if torch.cuda.is_available():
                                     torch.cuda.empty_cache()
-                                accepted_attempts.append(dict(attempt=iteration + 1, seed=self.seed, rejection_reasons=[str(e)], validators={}))
+                                accepted_attempts.append(dict(attempt=iteration + 1, seed=seed, rejection_reasons=[str(e)], validators={}))
                                 continue
                             raise
                         except Exception as e:
                             logger.warning(f"    Segment {seg_idx + 1}: generation error ({e})")
-                            accepted_attempts.append(dict(attempt=iteration + 1, seed=self.seed, rejection_reasons=[str(e)], validators={}))
+                            accepted_attempts.append(dict(attempt=iteration + 1, seed=seed, rejection_reasons=[str(e)], validators={}))
                             continue
 
                         # Skip validation when max_iterations == 1
                         if self.max_iterations == 1 and not self.strict_validation and validator is None:
                             raw_path = os.path.join(evidence_dir, f"{idx}-{decay_attempt}-{seg_idx}-{iteration}.wav")
                             self._save_wav(raw_path, audio.cpu().reshape(1, -1), self.sample_rate)
-                            selected_record = dict(attempt=iteration + 1, seed=self.seed, raw_audio=raw_path,
+                            selected_record = dict(attempt=iteration + 1, seed=seed, raw_audio=raw_path,
                                 validators={name: dict(status='unavailable', reason='Validation skipped')
                                             for name in ('accent', 'text', 'continuity')},
                                 rejection_reasons=['Validation skipped'])
@@ -951,7 +959,7 @@ class BaseTTS(ABC):
                             )
                             rejection_reasons = [f"{name} {'failed' if check['status'] == 'fail' else check['status']}" for name, check in checks.items()
                                                  if check['status'] != 'pass' and (name != 'continuity' or validator)]
-                            record = dict(attempt=iteration + 1, seed=self.seed, raw_audio=temp_path,
+                            record = dict(attempt=iteration + 1, seed=seed, raw_audio=temp_path,
                                           validators=checks, rejection_reasons=rejection_reasons)
                             accepted_attempts.append(record)
                             if validator:
@@ -988,7 +996,7 @@ class BaseTTS(ABC):
                         except CancelledException:
                             raise
                         except Exception as exc:
-                            accepted_attempts.append(dict(attempt=iteration + 1, seed=self.seed,
+                            accepted_attempts.append(dict(attempt=iteration + 1, seed=seed,
                                 raw_audio=temp_path, rejection_reasons=[str(exc)],
                                 validators=dict(
                                     accent=dict(status=('pass' if is_voice_ok else 'fail') if drift_prob is not None else 'unavailable', score=drift_prob),
@@ -1137,6 +1145,7 @@ class BaseTTS(ABC):
 
     # -- Unified generate() ----------------------------------------------------
 
+    @scoped_generation
     def generate(
         self,
         texts: Union[str, List[str]],
@@ -1213,6 +1222,8 @@ class BaseTTS(ABC):
                     num_samples = audio_for_duration.numel()
                 duration_sec = num_samples / self.sample_rate
 
+                if metadata.get("acceptance", {}).get("manifest"):
+                    metadata["acceptance"]["manifest"]["delivery"] = dict(format=format, speed=speed, pitch_semitones=pitch_semitones)
                 result = GenerationResult(
                     audio=final_audio,
                     sample_rate=self.sample_rate,
@@ -1314,6 +1325,8 @@ class BaseTTS(ABC):
         pitch_semitones: float = 0.0,
         progress_callback: Optional[Callable[[str], None]] = None,
         continuity: Optional[ContinuityConfig] = None,
+        job_id: Optional[str] = None,
+        job_seed: Optional[int] = None,
     ) -> Union[Optional[GenerationResult], Optional[List[Optional[GenerationResult]]]]:
         """Async wrapper around generate(). Runs inference in a thread executor."""
         loop = asyncio.get_running_loop()
@@ -1327,7 +1340,7 @@ class BaseTTS(ABC):
                 speed=speed,
                 pitch_semitones=pitch_semitones,
                 progress_callback=progress_callback,
-                continuity=continuity,
+                continuity=continuity, job_id=job_id, job_seed=job_seed,
             ),
         )
 
