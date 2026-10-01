@@ -129,6 +129,7 @@ class Worker:
                     segments_count=result.segments_count,
                     format=result.format,
                     continuity=result.continuity,
+                    acceptance=result.acceptance,
                 )
             elif isinstance(result, list):
                 # List of GenerationResult
@@ -150,6 +151,7 @@ class Worker:
                     durations=durations,
                     seg_counts=seg_counts,
                     continuities=[r.continuity if r is not None else None for r in result],
+                    acceptances=[r.acceptance if r is not None else None for r in result],
                     format=fmt,
                 )
             else:
@@ -216,6 +218,7 @@ class Worker:
         payload = {"message": str(exc)}
         if isinstance(exc, ValidationError):
             payload["error_type"] = "ValidationError"
+            payload["acceptance"] = exc.acceptance
         self._write(ERROR, **payload)
 
     # -- Main loop ---------------------------------------------------------

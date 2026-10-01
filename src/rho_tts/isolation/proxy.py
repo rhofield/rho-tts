@@ -9,6 +9,7 @@ main process when they may not be installed.
 import asyncio
 import logging
 import os
+import shutil
 import tempfile
 import threading
 from dataclasses import asdict
@@ -146,11 +147,19 @@ class ProviderProxy:
         elif resp.get("type") == ERROR:
             self._cleanup_temp(temp_dir)
             if resp.get("error_type") == "ValidationError":
-                raise ValidationError(resp.get("message", "Speech validation failed"))
+                raise ValidationError(resp.get("message", "Speech validation failed"), acceptance=resp.get("acceptance"))
             raise RuntimeError(f"Worker error: {resp.get('message')}")
         else:
             self._cleanup_temp(temp_dir)
             raise RuntimeError(f"Unexpected response: {resp}")
+
+    @staticmethod
+    def _retain_delivered_audio(result, path):
+        """Keep delivered audio evidence when the transport cleans its temp files."""
+        if result.acceptance is not None:
+            retained = os.path.join(tempfile.mkdtemp(prefix='rho_tts_delivered_'), os.path.basename(path))
+            shutil.copy2(path, retained)
+            result.acceptance['delivered_audio'] = retained
 
     def _build_results(self, resp, single_mode, use_temp, temp_dir):
         """Build GenerationResult(s) from worker response."""
@@ -168,11 +177,13 @@ class ProviderProxy:
                 segments_count=resp.get("segments_count", 0),
                 format=resp.get("format", "wav"),
                 continuity=resp.get("continuity"),
+                acceptance=resp.get("acceptance"),
             )
 
             if use_temp and result_path:
                 # Read audio into tensor, clean up temp
                 result.audio = self._load_audio_tensor(result_path)
+                self._retain_delivered_audio(result, result_path)
                 self._cleanup_temp(temp_dir)
                 result.path = None
             else:
@@ -194,9 +205,11 @@ class ProviderProxy:
                     segments_count=seg_counts[i] if i < len(seg_counts) else 0,
                     format=resp.get("format", "wav"),
                     continuity=(resp.get("continuities") or [None] * len(output_paths))[i],
+                    acceptance=(resp.get("acceptances") or [None] * len(output_paths))[i],
                 )
                 if use_temp:
                     r.audio = self._load_audio_tensor(path)
+                    self._retain_delivered_audio(r, path)
                     r.path = None
                 else:
                     r.path = path
@@ -280,7 +293,7 @@ class ProviderProxy:
                     break
                 elif resp_type == ERROR:
                     if resp.get("error_type") == "ValidationError":
-                        raise ValidationError(resp.get("message", "Speech validation failed"))
+                        raise ValidationError(resp.get("message", "Speech validation failed"), acceptance=resp.get("acceptance"))
                     break
         finally:
             cancel_stop.set()

@@ -27,7 +27,11 @@ class AudioGenerationError(RhoTTSError):
 
 
 class ValidationError(AudioGenerationError):
-    """Required speech validation failed or could not run."""
+    """Required speech validation failed or could not run, with retained evidence."""
+
+    def __init__(self, message, *, acceptance=None):
+        super().__init__(message)
+        self.acceptance = acceptance
 
 
 class FormatConversionError(RhoTTSError):

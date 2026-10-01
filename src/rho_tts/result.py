@@ -22,7 +22,9 @@ class GenerationResult:
         duration_sec: Duration of the audio in seconds.
         segments_count: Number of text segments that were generated and joined.
         format: Audio format (e.g. "wav", "mp3", "flac", "ogg").
-        continuity: Optional per-segment validation evidence and selected attempts.
+        continuity: Optional per-segment continuity comparisons and selected attempts.
+        acceptance: Overall acceptance, per-validator availability/verdicts, selected
+            attempts, raw candidate paths, retry rounds and effective settings.
     """
     path: Optional[str] = None
     audio: Optional[torch.Tensor] = None
@@ -34,3 +36,4 @@ class GenerationResult:
     text_similarity: Optional[float] = None
     decay_ratio: Optional[float] = None
     continuity: Optional[dict] = None
+    acceptance: Optional[dict] = None

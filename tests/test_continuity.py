@@ -222,6 +222,8 @@ class TestContinuity:
         candidates(tts, [0.8, 0.1, 0.1] if batch else [0.8, 0.1])
         result = proxy.generate(["Hello", "World"] if batch else "Hello", str(tmp_path / "out.wav"), continuity=context)
         first = result[0] if batch else result
+        assert first.acceptance["accepted"]
+        assert first.acceptance["segments"][0]["selected_attempt"] == 2
         assert first.continuity["passed"]
         assert first.continuity["segments"][0]["selected_attempt"] == 2
         assert transport.send.call_args.kwargs["continuity"] == asdict(context)
