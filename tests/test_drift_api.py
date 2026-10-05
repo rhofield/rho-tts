@@ -167,3 +167,21 @@ def test_voice_id_and_path_no_cache_collision():
         _models.update(saved_models)
         _thresholds.clear()
         _thresholds.update(saved_thresholds)
+
+
+@pytest.mark.parametrize("score", [0.05, 0.4])
+def test_numpy_drift_score_yields_json_serialisable_verdict(score):
+    """The verdict crosses the isolation boundary as JSON, which rejects numpy.bool."""
+    import json
+
+    import numpy as np
+
+    tts = FakeTTS(drift_model_path="/custom/model.pkl")
+    with patch(
+        "rho_tts.validation.classifier.predict_accent_drift_probability",
+        return_value=np.float64(score),
+    ):
+        drift_prob, is_ok = tts._validate_accent_drift("/audio.wav")
+
+    assert type(drift_prob) is float and type(is_ok) is bool
+    assert json.loads(json.dumps([drift_prob, is_ok])) == [score, score < 0.17]

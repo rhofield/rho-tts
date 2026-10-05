@@ -123,4 +123,4 @@ def predict_accent_drift_probability(
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message=".*does not have valid feature names.*")
         prob = model.predict_proba([feat])[0][1]  # Probability of "bad"
-    return prob
+    return float(prob)
