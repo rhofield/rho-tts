@@ -227,7 +227,10 @@ class BaseTTS(ABC):
             if drift_prob is None or not math.isfinite(drift_prob) or not 0 <= drift_prob <= 1:
                 logger.warning("Accent drift analysis failed (feature extraction error), skipping validation")
                 return None, True
-            passed = drift_prob < self.accent_drift_threshold
+            # Classifiers return NumPy scalars; the verdict crosses the isolation
+            # boundary as JSON, which rejects numpy.bool.
+            drift_prob = float(drift_prob)
+            passed = bool(drift_prob < self.accent_drift_threshold)
             logger.info(f"Accent drift likelihood: {drift_prob:.2f} (threshold: {self.accent_drift_threshold:.2f})")
             return drift_prob, passed
         except ImportError:
