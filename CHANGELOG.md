@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-10-06
+
+### Added
+- Audio continuity now checks pitch and brightness, which speaker embeddings deliberately ignore. A segment fails when its median F0 is more than `max_pitch_semitones` (default 3) from the neighbouring accepted speech, or its voiced-frame spectral tilt differs by more than `max_tilt_db` (default 5 dB). Until 3 s of speech is accepted, the reference voice tops up the comparison. Brightness is measured on voiced frames only, because whole-clip brightness mostly tracks sibilant count. Evidence reports `pitch_hz`, `tilt_db`, both differences and `voiced_seconds`.
+- A segment with at least 0.5 s of speech but no voiced frame fails continuity as unvoiced.
+- Breeze `temperature` option for the backbone and depth decoder (upstream default 0.9).
+- `segment_level_db`: each generated segment is scaled to this active-speech level before validation and joining, with an 18 dB boost cap and a peak ceiling. Breeze defaults to −23 dBFS; other providers leave it off.
+
+### Changed
+- Speaker similarity is reported but no longer judged on segments with under 1.5 s of speech. A 0.8 s sentence scored 0.56–0.64 even against its own sibling sentences, so it failed every attempt regardless of how it sounded.
+- When no candidate passes, the fallback is the one whose checks missed by least in total, each miss measured as a fraction of its threshold. Previously any candidate passing accent and text outranked every continuity result, so an 11-semitone pitch jump shipped over a take with only slight accent drift.
+- Breeze output loudness changes: segments are levelled to −23 dBFS by default. Pass `segment_level_db=None` for the previous behaviour.
+
 ## [1.3.5] - 2026-10-06
 
 ### Changed
