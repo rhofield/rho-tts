@@ -23,6 +23,10 @@ class ContinuityConfig:
     ``WINDOW_SECONDS``. With
     neither a reference voice nor a predecessor, the first segment establishes
     the voice.
+    That window lets each sentence sit on either side of it, so neighbours can
+    differ by twice its limits and sound stitched together. Set
+    ``max_adjacent_pitch_semitones`` / ``max_adjacent_tilt_db`` to also bound the
+    jump from the most recent accepted clip alone; ``None`` leaves it unchecked.
     Retries share the provider's max_iterations budget with other validators.
     strict_validation overrides allow_fallback.
     """
@@ -33,6 +37,8 @@ class ContinuityConfig:
     max_pitch_semitones: float = 3.0
     max_tilt_db: float = 5.0
     allow_fallback: bool = True
+    max_adjacent_pitch_semitones: Optional[float] = None
+    max_adjacent_tilt_db: Optional[float] = None
 
     def __post_init__(self):
         if not math.isfinite(self.min_similarity) or not 0 < self.min_similarity <= 1:
@@ -43,6 +49,11 @@ class ContinuityConfig:
             raise ValueError("max_pitch_semitones must be finite and in (0, 24]")
         if not math.isfinite(self.max_tilt_db) or not 0 < self.max_tilt_db <= 30:
             raise ValueError("max_tilt_db must be finite and in (0, 30]")
+        pitch, tilt = self.max_adjacent_pitch_semitones, self.max_adjacent_tilt_db
+        if pitch is not None and (not math.isfinite(pitch) or not 0 < pitch <= 24):
+            raise ValueError("max_adjacent_pitch_semitones must be None or finite and in (0, 24]")
+        if tilt is not None and (not math.isfinite(tilt) or not 0 < tilt <= 30):
+            raise ValueError("max_adjacent_tilt_db must be None or finite and in (0, 30]")
         if self.previous_audio is not None:
             object.__setattr__(self, "previous_audio", str(self.previous_audio))
 
@@ -163,6 +174,9 @@ class ContinuityValidator:
         self.config = config
         self.previous = ()
         self._anchor = None
+        self._adjacent = config.max_adjacent_pitch_semitones is not None or config.max_adjacent_tilt_db is not None
+        # Voice features of measured clips by id, so the accepted one is not re-measured.
+        self._voices = {}
         try:
             self.reference = _read(reference_audio) if reference_audio is not None else None
             if config.previous_audio is not None:
@@ -177,6 +191,18 @@ class ContinuityValidator:
         while len(window) > 1 and sum(map(len, window[1:])) >= WINDOW_SECONDS * _RATE:
             window = window[1:]
         self.previous = window
+        known = self._voices.get(id(speech))
+        self._voices = {id(speech): known} if known is not None and known[0] is speech else {}
+
+    def _last_voice(self):
+        """Voice features of the most recent accepted clip, which follows any restored window."""
+        if not self.previous:
+            return None
+        last = self.previous[-1]
+        known = self._voices.get(id(last))
+        if known is None or known[0] is not last:
+            known = self._voices[id(last)] = (last, voice_features(last))
+        return known[1]
 
     def _anchors(self):
         if self._anchor is None or self._anchor[0] is not self.previous:
@@ -213,6 +239,17 @@ class ContinuityValidator:
                 pitch = float(12 * np.log2(voice["pitch_hz"] / anchor_voice["pitch_hz"]))
             if voice["tilt_db"] is not None and anchor_voice and anchor_voice["tilt_db"] is not None:
                 tilt = voice["tilt_db"] - anchor_voice["tilt_db"]
+            adjacent_pitch = adjacent_tilt = None
+            if self._adjacent:
+                self._voices[id(speech)] = (speech, voice)
+                last = self._last_voice()
+                if voice["pitch_hz"] is not None and last and last["pitch_hz"] is not None:
+                    adjacent_pitch = float(12 * np.log2(voice["pitch_hz"] / last["pitch_hz"]))
+                if voice["tilt_db"] is not None and last and last["tilt_db"] is not None:
+                    adjacent_tilt = voice["tilt_db"] - last["tilt_db"]
+
+            def miss(value, limit):
+                return max(0, abs(value) - limit) / limit if value is not None and limit is not None else 0.0
             # Half a second of speech with no voiced frame at all is whispered or broken.
             unvoiced = voice["voiced_seconds"] == 0 and speech_seconds(speech, _RATE) >= 0.5
             score = (
@@ -220,6 +257,8 @@ class ContinuityValidator:
                 + max(0, (difference or 0.0) - cfg.max_loudness_db) / cfg.max_loudness_db
                 + max(0, abs(pitch or 0.0) - cfg.max_pitch_semitones) / cfg.max_pitch_semitones
                 + max(0, abs(tilt or 0.0) - cfg.max_tilt_db) / cfg.max_tilt_db
+                + miss(adjacent_pitch, cfg.max_adjacent_pitch_semitones)
+                + miss(adjacent_tilt, cfg.max_adjacent_tilt_db)
                 + float(unvoiced)
             )
             return dict(
@@ -229,6 +268,8 @@ class ContinuityValidator:
                 loudness_difference_db=difference,
                 pitch_difference_semitones=pitch,
                 tilt_difference_db=tilt,
+                adjacent_pitch_difference_semitones=adjacent_pitch,
+                adjacent_tilt_difference_db=adjacent_tilt,
                 pitch_hz=voice["pitch_hz"],
                 tilt_db=voice["tilt_db"],
                 voiced_seconds=voice["voiced_seconds"],
@@ -238,6 +279,8 @@ class ContinuityValidator:
                 maximum_loudness_difference_db=cfg.max_loudness_db,
                 maximum_pitch_difference_semitones=cfg.max_pitch_semitones,
                 maximum_tilt_difference_db=cfg.max_tilt_db,
+                maximum_adjacent_pitch_difference_semitones=cfg.max_adjacent_pitch_semitones,
+                maximum_adjacent_tilt_difference_db=cfg.max_adjacent_tilt_db,
                 reference_voice=self.reference is not None,
                 anchor_seconds=anchor_seconds,
             ), speech

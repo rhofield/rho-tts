@@ -269,6 +269,10 @@ class TestContinuity:
             {"max_pitch_semitones": float("nan")},
             {"max_tilt_db": -1},
             {"max_tilt_db": float("inf")},
+            {"max_adjacent_pitch_semitones": 0},
+            {"max_adjacent_pitch_semitones": float("nan")},
+            {"max_adjacent_tilt_db": -1},
+            {"max_adjacent_tilt_db": float("inf")},
         ],
     )
     def test_invalid_config(self, kwargs):
@@ -389,6 +393,59 @@ class TestVoiceConsistency:
         result, _ = validator.evaluate(torch.ones(32000) * 0.1, 16000)
         assert result["tilt_difference_db"] == pytest.approx(6.0)
         assert not result["passed"]
+
+    def level_voice(self, tilt_per_unit=0.0):
+        """Pitch rises 20 st, and tilt by ``tilt_per_unit`` dB, per unit of mean amplitude above 0.1.
+
+        Linear in the mean, so a concatenated window measures as the average of its clips.
+        """
+        def features(samples, rate=16000):
+            shift = (float(np.mean(samples)) - 0.1)
+            return dict(VOICE, pitch_hz=100 * 2 ** (shift * 20 / 12), tilt_db=VOICE["tilt_db"] + shift * tilt_per_unit)
+        self.monkeypatch.setattr(module, "voice_features", features)
+
+    def sentence(self, validator, level):
+        result, speech = validator.evaluate(torch.ones(32000) * level, 16000)
+        return result, speech
+
+    @pytest.mark.parametrize("limit, passed", [(None, True), (3.5, True), (2.5, False)])
+    def test_jump_from_the_previous_sentence(self, limit, passed):
+        # Accepted 0 st then +2 st; the window averages +1 st. A -1 st candidate is
+        # 2 st from the window but 3 st below the sentence just before it.
+        self.level_voice()
+        validator = module.ContinuityValidator(ContinuityConfig(max_loudness_db=30, max_adjacent_pitch_semitones=limit))
+        for level in (0.1, 0.2):
+            validator.advance(self.sentence(validator, level)[1])
+        result, _ = self.sentence(validator, 0.05)
+        assert result["pitch_difference_semitones"] == pytest.approx(-2.0)
+        if limit is None:
+            assert result["adjacent_pitch_difference_semitones"] is None
+        else:
+            assert result["adjacent_pitch_difference_semitones"] == pytest.approx(-3.0)
+        assert result["passed"] is passed
+
+    def test_brightness_jump_from_the_previous_sentence(self):
+        self.level_voice(tilt_per_unit=40.0)
+        validator = module.ContinuityValidator(ContinuityConfig(
+            max_loudness_db=30, max_pitch_semitones=24, max_adjacent_pitch_semitones=24, max_adjacent_tilt_db=3))
+        for level in (0.1, 0.2):
+            validator.advance(self.sentence(validator, level)[1])
+        result, _ = self.sentence(validator, 0.1)
+        assert result["tilt_difference_db"] == pytest.approx(-2.0)
+        assert result["adjacent_tilt_difference_db"] == pytest.approx(-4.0)
+        assert result["maximum_adjacent_tilt_difference_db"] == 3
+        assert not result["passed"]
+
+    def test_adjacent_check_follows_a_restored_window(self):
+        self.level_voice()
+        validator = module.ContinuityValidator(ContinuityConfig(max_loudness_db=30, max_adjacent_pitch_semitones=1.5))
+        validator.advance(self.sentence(validator, 0.1)[1])
+        snapshot = validator.previous
+        validator.advance(self.sentence(validator, 0.2)[1])
+        validator.previous = snapshot
+        result, _ = self.sentence(validator, 0.15)
+        assert result["adjacent_pitch_difference_semitones"] == pytest.approx(1.0)
+        assert result["passed"]
 
     def test_unmeasurable_pitch_is_not_judged_but_silent_voicing_fails(self):
         quiet = dict(pitch_hz=None, tilt_db=None, voiced_seconds=0.1)
