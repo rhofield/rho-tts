@@ -134,6 +134,7 @@ class BreezeTTS(BaseTTS):
         codec_chunk_frames: int = 2,
         temperature: Optional[float] = None,
         segment_level_db: Optional[float] = -23.0,
+        min_segment_chars: int = 0,
     ):
         super().__init__(device, seed, deterministic, phonetic_mapping=phonetic_mapping)
 
@@ -165,6 +166,8 @@ class BreezeTTS(BaseTTS):
             raise ValueError(f"temperature must be in (0, 2], got {temperature}")
         if segment_level_db is not None and not (math.isfinite(segment_level_db) and -60 <= segment_level_db < 0):
             raise ValueError(f"segment_level_db must be in [-60, 0), got {segment_level_db}")
+        if isinstance(min_segment_chars, bool) or not isinstance(min_segment_chars, int) or min_segment_chars < 0:
+            raise ValueError(f"min_segment_chars must be a non-negative integer, got {min_segment_chars!r}")
 
         self.reference_audio_path = reference_audio
         self.reference_text = reference_text
@@ -173,6 +176,7 @@ class BreezeTTS(BaseTTS):
         self.cfg_scale = cfg_scale
         self.temperature = temperature
         self.segment_level_db = segment_level_db
+        self.min_segment_chars = min_segment_chars
         self.attn_implementation = attn_implementation
         self.fast = fast
         self.compile_depth = compile_depth

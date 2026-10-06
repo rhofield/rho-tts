@@ -66,6 +66,13 @@ class TestBreezeValidation:
             with pytest.raises(ValueError, match="segment_level_db"):
                 _make(instruction="x", segment_level_db=bad)
 
+    def test_min_segment_chars(self):
+        assert _make(instruction="x").min_segment_chars == 0
+        assert _make(instruction="x", min_segment_chars=30).min_segment_chars == 30
+        for bad in (-1, 2.5, True):
+            with pytest.raises(ValueError, match="min_segment_chars"):
+                _make(instruction="x", min_segment_chars=bad)
+
     def test_defaults_to_sdpa_attention(self):
         assert _make(instruction="x").attn_implementation == "sdpa"
         assert _make(instruction="x", attn_implementation="eager").attn_implementation == "eager"

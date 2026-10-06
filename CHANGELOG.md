@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `min_segment_chars` (Breeze option, default 0 = off): after sentence splitting, a segment shorter than this joins the next one, and a short final segment joins the previous one, never past `max_chars_per_segment`. "Here's a puzzle." spoken alone had 0.24 s of voiced audio. That was too little for continuity to measure pitch or speaker, and a take about 4 semitones high was accepted.
+
+### Changed
+- Generation manifests record `min_segment_chars`, so every manifest fingerprint changes once.
+
 ## [1.4.0] - 2026-10-06
 
 ### Added
