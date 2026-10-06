@@ -42,6 +42,9 @@ class BaseTTS(ABC):
     """Abstract base class for TTS implementations."""
 
     strict_validation = False
+    # Active-speech level (dBFS) each generated segment is scaled to before
+    # validation and joining; None leaves segment loudness as generated.
+    segment_level_db: Optional[float] = None
 
     MAX_MODEL_CHARS = 3000
     BYTES_PER_CHAR_ESTIMATE = 500_000
@@ -457,6 +460,33 @@ class BaseTTS(ABC):
 
         return audio.view(original_shape)
 
+    # Gain limits for segment levelling: never boost noise by more than this, and
+    # back the gain off rather than let a peak clip.
+    MAX_LEVEL_GAIN_DB = 18.0
+    LEVEL_PEAK_CEILING = 0.98
+
+    def _level_segment(self, audio: torch.Tensor) -> torch.Tensor:
+        """Scale one segment's active speech to ``segment_level_db``.
+
+        Each sentence is a separate generation, so without this adjacent
+        sentences landed several dB apart and the drift accumulated across a
+        passage while every neighbouring pair stayed under the continuity limit.
+        """
+        if self.segment_level_db is None:
+            return audio
+        from .continuity import speech_level
+
+        try:
+            level = speech_level(audio.detach().float().cpu().reshape(-1).numpy(), self.sample_rate)
+        except ValueError:
+            return audio  # Silent output: nothing to level; validation rejects it.
+        gain_db = min(self.segment_level_db - level, self.MAX_LEVEL_GAIN_DB)
+        gain = 10 ** (gain_db / 20)
+        peak = float(audio.abs().max())
+        if peak * gain > self.LEVEL_PEAK_CEILING:
+            gain = self.LEVEL_PEAK_CEILING / peak
+        return audio * gain
+
     def _smooth_segment_join(self, audio_segments: list[torch.Tensor]) -> torch.Tensor:
         """
         Join audio segments with silence trimming and crossfading for smooth transitions.
@@ -742,12 +772,27 @@ class BaseTTS(ABC):
             'reference_audio_path', 'reference_text', 'attn_implementation', 'fast', 'compile_depth',
             'cuda_graph_depth', 'codec_chunk_frames', 'deterministic', 'force_sentence_split',
             'cfg_scale', 'instruction', 'temperature', 'top_p', 'top_k',
-            'crossfade_duration_sec', 'inter_sentence_pause_sec')}
+            'crossfade_duration_sec', 'inter_sentence_pause_sec', 'segment_level_db')}
         if continuity is not None:
             from dataclasses import asdict
             settings['continuity'] = asdict(continuity)
         return dict(settings=settings, provider=type(self).__name__, package_version=__version__,
                     package_source_hash=hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
+
+    def _fallback_deficit(self, drift_prob, text_sim, is_text_ok, comparison) -> float:
+        """Sum each check's miss as a fraction of its threshold; 0 means every check passed.
+
+        Used to choose among candidates when none passes. Ranking passing
+        validators first let an 11-semitone pitch jump ship over a take that
+        only drifted slightly in accent, so no check outranks another outright.
+        An unmeasured check (classifier unavailable, or text skipped after an
+        accent failure) adds nothing.
+        """
+        accent = (max(0.0, drift_prob - self.accent_drift_threshold) / self.accent_drift_threshold
+                  if drift_prob is not None else 0.0)
+        text = (max(0.0, self.text_similarity_threshold - text_sim) / self.text_similarity_threshold
+                if is_text_ok is False and text_sim is not None else 0.0)
+        return accent + text + comparison["score"]
 
     def _run_pipeline(
         self,
@@ -846,7 +891,7 @@ class BaseTTS(ABC):
                         logger.info(f"    Iteration {iteration + 1}: seed {seed}")
 
                         try:
-                            audio = self._generate_audio(segment)
+                            audio = self._level_segment(self._generate_audio(segment))
                             last_audio = audio
                         except ValueError:
                             raise  # config error — don't retry
@@ -940,9 +985,9 @@ class BaseTTS(ABC):
                                 continuity_ok = comparison["passed"]
                                 attempts.append(dict(comparison, attempt=iteration + 1,
                                                      voice_passed=is_voice_ok, text_passed=is_text_ok))
-                                # Prefer candidates passing the existing validators, then
-                                # rank by continuity deficit; preserve earliest ties.
-                                score = (int(not (is_voice_ok and is_text_ok)), comparison["score"], ranked_drift)
+                                # Rank by how far each check missed, on one scale; earliest wins ties.
+                                score = (self._fallback_deficit(drift_prob, text_sim, is_text_ok, comparison),
+                                         ranked_drift)
                                 if selected_attempt is None or score < best_score:
                                     best_score = score
                                     best_audio = audio.clone()

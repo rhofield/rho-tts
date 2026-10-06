@@ -31,6 +31,17 @@ def candidates(tts, amplitudes):
     return seeds
 
 
+VOICE = dict(pitch_hz=100.0, tilt_db=-18.0, voiced_seconds=1.0)
+
+
+def harmonic(pitch, seconds=2.0, rate=16000, brightness=1.0):
+    """A voiced-sounding tone: harmonics of ``pitch`` whose upper partials scale with ``brightness``."""
+    t = np.arange(int(seconds * rate)) / rate
+    partials = [(k, 1 / k * (brightness if k * pitch > 2000 else 1)) for k in range(1, int(6000 / pitch))]
+    wave = sum(a * np.sin(2 * np.pi * k * pitch * t) for k, a in partials)
+    return (0.1 * wave / np.abs(wave).max()).astype(np.float32)
+
+
 def reference(tmp_path):
     path = tmp_path / "previous.wav"
     sf.write(path, np.sin(np.arange(16000) * 0.07) * 0.1, 16000)
@@ -52,6 +63,8 @@ class TestContinuity:
         self.monkeypatch.setattr(
             module, "_features", lambda samples, rate: (np.array([1.0, 0.0]), module.speech_level(samples, rate))
         )
+        # Pitch tracking is exercised directly below; elsewhere every clip sounds alike.
+        self.monkeypatch.setattr(module, "voice_features", lambda samples, rate=16000: VOICE)
 
     def teardown_method(self):
         self.monkeypatch.undo()
@@ -106,6 +119,22 @@ class TestContinuity:
         assert not result.continuity["passed"]
         assert result.continuity["segments"][0]["selected_attempt"] == 2
         assert result.audio.abs().max().item() == pytest.approx(0.3, abs=0.001)
+        assert tts._generate_audio.call_count == 3
+
+    @pytest.mark.parametrize("drifts, selected", [
+        # A loud take that passes accent loses to a level take that drifts slightly...
+        ([0.05, 0.2, 0.9], 2),
+        # ...but a level take with far worse drift loses to a slightly loud one.
+        ([0.05, 0.9, 0.9], 1),
+    ])
+    def test_exhaustion_sums_threshold_misses(self, tmp_path, drifts, selected):
+        tts = self.tts
+        threshold = tts.accent_drift_threshold
+        tts._validate_accent_drift = Mock(side_effect=[(d, d <= threshold) for d in drifts])
+        # Previous speech is 0.1; 0.25 is 8 dB louder (limit 6 dB), 0.1 matches.
+        candidates(tts, [0.25, 0.1, 0.8])
+        result = tts.generate("Hello", continuity=ContinuityConfig(previous_audio=reference(tmp_path)))
+        assert result.continuity["segments"][0]["selected_attempt"] == selected
         assert tts._generate_audio.call_count == 3
 
     @pytest.mark.parametrize("strict", [False, True])
@@ -190,10 +219,11 @@ class TestContinuity:
             module, "_features", lambda samples, rate: (np.array([1.0, 0.0] if samples.mean() > 0 else [0.0, 1.0]), -20.0)
         )
         validator = module.ContinuityValidator(ContinuityConfig())
-        _, speech = validator.evaluate(torch.ones(16000) * 0.1, 16000)
+        _, speech = validator.evaluate(torch.ones(32000) * 0.1, 16000)
         validator.advance(speech)
-        result, _ = validator.evaluate(-torch.ones(16000) * 0.1, 16000)
+        result, _ = validator.evaluate(-torch.ones(32000) * 0.1, 16000)
         assert not result["passed"]
+        assert result["speaker_judged"]
         assert result["speaker_similarity"] == 0
         assert result["loudness_difference_db"] == pytest.approx(0, abs=1e-6)
 
@@ -214,7 +244,7 @@ class TestContinuity:
         voice = tmp_path / "voice.wav"
         sf.write(voice, np.full(24000, 0.1), 24000)
         validator = module.ContinuityValidator(ContinuityConfig(), reference_audio=str(voice))
-        result, _ = validator.evaluate(-torch.ones(16000) * 0.1, 16000)
+        result, _ = validator.evaluate(-torch.ones(32000) * 0.1, 16000)
         assert not result["passed"]
         assert result["reference_voice"]
         assert result["anchor_seconds"] == pytest.approx(1.0)
@@ -235,6 +265,10 @@ class TestContinuity:
             {"min_similarity": 0},
             {"max_loudness_db": float("inf")},
             {"max_loudness_db": 0},
+            {"max_pitch_semitones": 0},
+            {"max_pitch_semitones": float("nan")},
+            {"max_tilt_db": -1},
+            {"max_tilt_db": float("inf")},
         ],
     )
     def test_invalid_config(self, kwargs):
@@ -306,3 +340,94 @@ class TestContinuity:
         )
         with pytest.raises(ValidationError, match="invalid speaker features"):
             module.ContinuityValidator(ContinuityConfig()).evaluate(torch.ones(16000) * 0.1, 16000)
+
+
+class TestVoiceConsistency:
+    """Checks resemblyzer cannot make: a short clip, pitch, brightness and voicing."""
+
+    def setup_method(self):
+        self.monkeypatch = pytest.MonkeyPatch()
+        # Speakers differ by sign; loudness is real.
+        self.monkeypatch.setattr(module, "_features", lambda samples, rate: (
+            np.array([1.0, 0.0] if samples.mean() >= 0 else [0.0, 1.0]), module.speech_level(samples, rate)))
+
+    def teardown_method(self):
+        self.monkeypatch.undo()
+
+    def voices(self, *features):
+        """Queue voice_features results: each anchor change measures the anchor, then each candidate."""
+        values = iter(features)
+        self.monkeypatch.setattr(module, "voice_features", lambda samples, rate=16000: next(values))
+
+    def accepted(self, validator, seconds=2.0):
+        _, speech = validator.evaluate(torch.ones(int(seconds * 16000)) * 0.1, 16000)
+        validator.advance(speech)
+
+    def test_short_clip_reports_but_does_not_judge_the_speaker(self):
+        self.voices(VOICE, VOICE)
+        validator = module.ContinuityValidator(ContinuityConfig())
+        self.accepted(validator)
+        result, _ = validator.evaluate(-torch.ones(int(0.8 * 16000)) * 0.1, 16000)
+        assert result["speaker_similarity"] == 0
+        assert not result["speaker_judged"]
+        assert result["passed"]
+
+    @pytest.mark.parametrize("pitch, passed", [(100 * 2 ** (2.9 / 12), True), (100 * 2 ** (4.6 / 12), False),
+                                               (100 * 2 ** (-4.4 / 12), False)])
+    def test_pitch_jump_fails(self, pitch, passed):
+        self.voices(VOICE, dict(VOICE, pitch_hz=pitch))
+        validator = module.ContinuityValidator(ContinuityConfig())
+        self.accepted(validator)
+        result, _ = validator.evaluate(torch.ones(32000) * 0.1, 16000)
+        assert result["pitch_difference_semitones"] == pytest.approx(12 * np.log2(pitch / 100))
+        assert result["passed"] is passed
+
+    def test_brightness_jump_fails(self):
+        self.voices(VOICE, dict(VOICE, tilt_db=-12.0))
+        validator = module.ContinuityValidator(ContinuityConfig())
+        self.accepted(validator)
+        result, _ = validator.evaluate(torch.ones(32000) * 0.1, 16000)
+        assert result["tilt_difference_db"] == pytest.approx(6.0)
+        assert not result["passed"]
+
+    def test_unmeasurable_pitch_is_not_judged_but_silent_voicing_fails(self):
+        quiet = dict(pitch_hz=None, tilt_db=None, voiced_seconds=0.1)
+        self.voices(VOICE, quiet, dict(quiet, voiced_seconds=0.0))
+        validator = module.ContinuityValidator(ContinuityConfig())
+        self.accepted(validator)
+        result, _ = validator.evaluate(torch.ones(32000) * 0.1, 16000)
+        assert result["passed"] and result["pitch_difference_semitones"] is None
+        result, _ = validator.evaluate(torch.ones(32000) * 0.1, 16000)
+        assert result["unvoiced"] and not result["passed"]
+
+    def test_reference_anchors_pitch_until_speech_fills_the_window(self, tmp_path):
+        voice = tmp_path / "voice.wav"
+        sf.write(voice, np.full(32000, 0.1), 16000)
+        anchors = []
+        high = dict(VOICE, pitch_hz=130.0)
+
+        def features(samples, rate=16000):
+            anchors.append(len(samples) / 16000)
+            return VOICE if len(anchors) == 1 else high
+        self.monkeypatch.setattr(module, "voice_features", features)
+        validator = module.ContinuityValidator(ContinuityConfig(), reference_audio=str(voice))
+        result, speech = validator.evaluate(torch.ones(32000) * 0.1, 16000)
+        assert not result["passed"]  # 130 Hz against the 100 Hz reference
+        validator.advance(speech)
+        validator.evaluate(torch.ones(32000) * 0.1, 16000)
+        validator.advance(speech)
+        result, _ = validator.evaluate(torch.ones(32000) * 0.1, 16000)
+        assert result["passed"]
+        # Measured: reference, candidate, reference + 2 s, candidate, 4 s of speech alone, candidate.
+        assert anchors == [2.0, 2.0, 4.0, 2.0, 4.0, 2.0]
+
+    def test_voice_features_measure_pitch_and_brightness(self):
+        dull = module.voice_features(harmonic(110))
+        bright = module.voice_features(harmonic(110, brightness=4.0))
+        assert dull["pitch_hz"] == pytest.approx(110, rel=0.03)
+        assert dull["voiced_seconds"] > 1.5
+        assert bright["tilt_db"] - dull["tilt_db"] == pytest.approx(20 * np.log10(4), abs=1.5)
+
+    def test_voice_features_need_enough_voiced_speech(self):
+        result = module.voice_features(harmonic(110, seconds=0.15))
+        assert result["pitch_hz"] is None and result["tilt_db"] is None

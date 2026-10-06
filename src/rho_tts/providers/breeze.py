@@ -15,6 +15,7 @@ extra for that reason.
 """
 import contextlib
 import logging
+import math
 import os
 import tempfile
 from pathlib import Path
@@ -92,6 +93,12 @@ class BreezeTTS(BaseTTS):
         codec_chunk_frames: Codec frames decoded per streamed chunk (1–16).
             The default is 2; smaller values reduce first-audio latency but
             may increase total generation time.
+        temperature: Sampling temperature for the backbone and depth decoder.
+            None keeps upstream's 0.9. Lower values make separately generated
+            sentences vary less in pitch and delivery, at some cost in liveliness.
+        segment_level_db: Active-speech level (dBFS) each sentence is scaled to
+            before validation and joining, so separately generated sentences
+            match in loudness. None leaves output as generated.
         strict_validation: Require working validators and reject audio after failed retries
         max_chars_per_segment: Max characters per text segment
         max_iterations: Maximum validation retry iterations
@@ -125,6 +132,8 @@ class BreezeTTS(BaseTTS):
         cuda_graph_depth: bool = False,
         triton_depth_sampling: bool = False,
         codec_chunk_frames: int = 2,
+        temperature: Optional[float] = None,
+        segment_level_db: Optional[float] = -23.0,
     ):
         super().__init__(device, seed, deterministic, phonetic_mapping=phonetic_mapping)
 
@@ -152,12 +161,18 @@ class BreezeTTS(BaseTTS):
             raise ValueError("codec_chunk_frames must be an integer from 1 to 16")
         if fast and codec_chunk_frames not in (1, 2):
             raise ValueError("codec_chunk_frames cannot override the upstream fast codec")
+        if temperature is not None and not (math.isfinite(temperature) and 0 < temperature <= 2):
+            raise ValueError(f"temperature must be in (0, 2], got {temperature}")
+        if segment_level_db is not None and not (math.isfinite(segment_level_db) and -60 <= segment_level_db < 0):
+            raise ValueError(f"segment_level_db must be in [-60, 0), got {segment_level_db}")
 
         self.reference_audio_path = reference_audio
         self.reference_text = reference_text
         self.voice_cloning = reference_audio is not None
         self.instruction = instruction if instruction is not None else NEUTRAL_INSTRUCTION
         self.cfg_scale = cfg_scale
+        self.temperature = temperature
+        self.segment_level_db = segment_level_db
         self.attn_implementation = attn_implementation
         self.fast = fast
         self.compile_depth = compile_depth
@@ -280,6 +295,10 @@ class BreezeTTS(BaseTTS):
         from breeze_infer.runtime import update_generation_config_for_breeze
 
         update_generation_config_for_breeze(self.model)
+        if self.temperature is not None:
+            # Both configs, so the replay manifest records what was sampled with.
+            self.model.generation_config.temperature = self.temperature
+            self.model.depth_decoder.generation_config.temperature = self.temperature
 
     def _warmup(self) -> None:
         """Run the compiled fast path's warmup profile."""

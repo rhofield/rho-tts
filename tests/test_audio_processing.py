@@ -1,4 +1,5 @@
 """Tests for audio processing utilities: silence trimming, fades, DC offset removal."""
+import pytest
 import torch
 
 from rho_tts.base_tts import BaseTTS
@@ -27,6 +28,49 @@ ConcreteTTS._trim_silence = BaseTTS._trim_silence
 ConcreteTTS._remove_dc_offset = BaseTTS._remove_dc_offset
 ConcreteTTS._apply_fades = BaseTTS._apply_fades
 ConcreteTTS._smooth_segment_join = BaseTTS._smooth_segment_join
+ConcreteTTS._level_segment = BaseTTS._level_segment
+ConcreteTTS.MAX_LEVEL_GAIN_DB = BaseTTS.MAX_LEVEL_GAIN_DB
+ConcreteTTS.LEVEL_PEAK_CEILING = BaseTTS.LEVEL_PEAK_CEILING
+ConcreteTTS.segment_level_db = None
+
+
+class TestSegmentLevelling:
+    def level(self, audio, target=-23.0):
+        from rho_tts.continuity import speech_level
+
+        tts = ConcreteTTS()
+        tts.segment_level_db = target
+        out = tts._level_segment(audio)
+        return out, speech_level(out.numpy(), 16000)
+
+    def test_disabled_by_default(self):
+        audio = torch.sin(torch.arange(16000) * 0.07) * 0.01
+        assert ConcreteTTS()._level_segment(audio) is audio
+
+    def test_quiet_and_loud_sentences_meet_at_the_target(self):
+        tone = torch.sin(torch.arange(16000) * 0.07)
+        _, quiet = self.level(tone * 0.02)
+        _, loud = self.level(tone * 0.2)
+        assert quiet == pytest.approx(-23.0, abs=0.01)
+        assert loud == pytest.approx(-23.0, abs=0.01)
+
+    def test_peaks_are_never_clipped(self):
+        # A spike far above the speech level would clip if gain were applied in full.
+        audio = torch.sin(torch.arange(16000) * 0.07) * 0.01
+        audio[100] = 0.5
+        out, _ = self.level(audio, target=-6.0)
+        assert float(out.abs().max()) == pytest.approx(BaseTTS.LEVEL_PEAK_CEILING)
+
+    def test_boost_is_capped(self):
+        audio = torch.sin(torch.arange(16000) * 0.07) * 0.0005
+        out, _ = self.level(audio)
+        assert float(out.abs().max() / audio.abs().max()) == pytest.approx(10 ** (18 / 20))
+
+    def test_silence_passes_through(self):
+        audio = torch.zeros(16000)
+        tts = ConcreteTTS()
+        tts.segment_level_db = -23.0
+        assert torch.equal(tts._level_segment(audio), audio)
 
 
 class TestDCOffsetRemoval:

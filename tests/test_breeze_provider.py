@@ -54,6 +54,18 @@ class TestBreezeValidation:
         with pytest.raises(ValueError, match="cfg_scale"):
             _make(instruction="x", cfg_scale=bad)
 
+    def test_temperature_and_levelling(self):
+        tts = _make(instruction="x")
+        assert tts.temperature is None
+        assert tts.segment_level_db == -23.0
+        assert _make(instruction="x", temperature=0.7, segment_level_db=None).segment_level_db is None
+        for bad in (0, -0.1, 2.5, float("nan")):
+            with pytest.raises(ValueError, match="temperature"):
+                _make(instruction="x", temperature=bad)
+        for bad in (0, 3.0, -80.0, float("nan")):
+            with pytest.raises(ValueError, match="segment_level_db"):
+                _make(instruction="x", segment_level_db=bad)
+
     def test_defaults_to_sdpa_attention(self):
         assert _make(instruction="x").attn_implementation == "sdpa"
         assert _make(instruction="x", attn_implementation="eager").attn_implementation == "eager"
