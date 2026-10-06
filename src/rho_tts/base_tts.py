@@ -88,6 +88,8 @@ class BaseTTS(ABC):
         self.trim_silence = True
         self.fade_duration_sec = 0.02
         self.force_sentence_split = True
+        # Sentences shorter than this merge with a neighbour; 0 keeps every split.
+        self.min_segment_chars = 0
         self.inter_sentence_pause_sec = 0.1
 
         # Voice ID for per-voice classifier model lookup (set by UI state)
@@ -637,7 +639,28 @@ class BaseTTS(ABC):
         if current_segment.strip():
             segments.append(current_segment.strip())
 
-        return segments
+        return self._merge_short_segments(segments, max_chars)
+
+    def _merge_short_segments(self, segments: list[str], max_chars: int) -> list[str]:
+        """Join segments under ``min_segment_chars`` to the next one, or the last to the previous.
+
+        A three-word opener spoken alone gives the model too little text to
+        settle the voice, and too little voiced audio for continuity to measure
+        pitch or speaker. Merges never push a segment past ``max_chars``.
+        """
+        min_chars = getattr(self, 'min_segment_chars', 0)
+        if not min_chars or len(segments) < 2:
+            return segments
+        merged = [segments[0]]
+        for segment in segments[1:]:
+            joined = f"{merged[-1]} {segment}"
+            if len(merged[-1]) < min_chars and len(joined) <= max_chars:
+                merged[-1] = joined
+            else:
+                merged.append(segment)
+        if len(merged) > 1 and len(merged[-1]) < min_chars and len(merged[-2]) + 1 + len(merged[-1]) <= max_chars:
+            merged[-2:] = [f"{merged[-2]} {merged[-1]}"]
+        return merged
 
     @abstractmethod
     def _generate_audio(self, text: Union[str, List[str]], **kwargs) -> Union[torch.Tensor, List[torch.Tensor]]:
@@ -771,7 +794,7 @@ class BaseTTS(ABC):
             'text_similarity_threshold', 'sound_decay_threshold', 'drift_model_path', 'voice_id',
             'reference_audio_path', 'reference_text', 'attn_implementation', 'fast', 'compile_depth',
             'cuda_graph_depth', 'codec_chunk_frames', 'deterministic', 'force_sentence_split',
-            'cfg_scale', 'instruction', 'temperature', 'top_p', 'top_k',
+            'min_segment_chars', 'cfg_scale', 'instruction', 'temperature', 'top_p', 'top_k',
             'crossfade_duration_sec', 'inter_sentence_pause_sec', 'segment_level_db')}
         if continuity is not None:
             from dataclasses import asdict

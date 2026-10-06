@@ -96,6 +96,43 @@ class TestTextSplitting:
         assert len(result) == 1
 
 
+class TestShortSentenceMerging:
+    """A one-line opener spoken alone has too little context to settle the voice
+    and too little voiced audio for continuity to judge, so it merges onward."""
+
+    TEXT = "Here's a puzzle. Take three boxes: dog, bites, man. Arrange them one way and you get a headline."
+
+    def _split(self, text, min_chars, max_chars=1000):
+        tts = ConcreteTTS()
+        tts.min_segment_chars = min_chars
+        return tts._split_text_into_segments(text, max_chars)
+
+    def test_off_by_default(self):
+        assert ConcreteTTS()._split_text_into_segments(self.TEXT, 1000)[0] == "Here's a puzzle."
+
+    def test_short_opener_merges_into_next_sentence(self):
+        assert self._split(self.TEXT, 30) == [
+            "Here's a puzzle. Take three boxes: dog, bites, man.",
+            "Arrange them one way and you get a headline.",
+        ]
+
+    def test_consecutive_short_sentences_merge_until_long_enough(self):
+        assert self._split("Yes. No. Maybe so. This sentence is long enough alone.", 15) == [
+            "Yes. No. Maybe so.",
+            "This sentence is long enough alone.",
+        ]
+
+    def test_short_final_sentence_merges_backward(self):
+        assert self._split("This first sentence is plenty long. Done.", 30) == [
+            "This first sentence is plenty long. Done.",
+        ]
+
+    def test_merge_never_exceeds_max_chars(self):
+        assert self._split("Hi. This next sentence is quite long here.", 30, max_chars=40) == [
+            "Hi.", "This next sentence is quite long here.",
+        ]
+
+
 class TestNumberNormalization:
     """Test the number normalizer used in STT validation."""
 
