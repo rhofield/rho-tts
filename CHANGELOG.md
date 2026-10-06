@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `min_segment_chars` (Breeze option, default 0 = off): after sentence splitting, a segment shorter than this joins the next one, and a short final segment joins the previous one, never past `max_chars_per_segment`. "Here's a puzzle." spoken alone had 0.24 s of voiced audio. That was too little for continuity to measure pitch or speaker, and a take about 4 semitones high was accepted.
+- `ContinuityConfig.max_adjacent_pitch_semitones` and `max_adjacent_tilt_db` (default `None` = off): also limit the pitch and brightness jump from the most recently accepted clip on its own. The window check lets each sentence sit on either side of the window, so neighbours could differ by twice its limits (up to 6 semitones or 10 dB) and sound stitched together. Misses count toward the fallback ranking. Evidence reports `adjacent_pitch_difference_semitones`, `adjacent_tilt_difference_db` and both limits.
 
 ### Changed
 - Generation manifests record `min_segment_chars`, so every manifest fingerprint changes once.
