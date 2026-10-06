@@ -764,7 +764,8 @@ class BaseTTS(ABC):
         """
         token = cancellation_token
         token.raise_if_cancelled()
-        validator = ContinuityValidator(continuity) if continuity is not None else None
+        validator = (ContinuityValidator(continuity, getattr(self, 'reference_audio_path', None))
+                     if continuity is not None else None)
         acceptance_context = self._acceptance_context(continuity)
         job = _active_job.get() or dict(id=fingerprint(texts), seed=self.seed)
         acceptance_context['manifest'] = self.generation_manifest(texts, job_id=job['id'], job_seed=job['seed'], continuity=continuity, **job.get('delivery', {}))
@@ -958,8 +959,11 @@ class BaseTTS(ABC):
                                 text=verdict(is_text_ok, transcribed is not None, score=text_sim, threshold=self.text_similarity_threshold, transcript=transcribed),
                                 continuity=verdict(continuity_ok, comparison is not None, evidence=comparison),
                             )
+                            if drift_prob is not None and not is_voice_ok:
+                                # Text is only checked once accent passes; the accent failure is the reason.
+                                checks['text'] = dict(checks['text'], status='skipped', reason='accent failed')
                             rejection_reasons = [f"{name} {'failed' if check['status'] == 'fail' else check['status']}" for name, check in checks.items()
-                                                 if check['status'] != 'pass' and (name != 'continuity' or validator)]
+                                                 if check['status'] not in ('pass', 'skipped') and (name != 'continuity' or validator)]
                             record = dict(attempt=iteration + 1, seed=seed, raw_audio=temp_path,
                                           validators=checks, rejection_reasons=rejection_reasons)
                             accepted_attempts.append(record)
@@ -1055,7 +1059,7 @@ class BaseTTS(ABC):
                         if best_features is None:
                             raise ValidationError(f"Segment {seg_idx + 1}: no continuity-validated candidate",
                                 acceptance=dict(**acceptance_context, accepted=False, rounds=rounds, segments=acceptance_segments))
-                        validator.previous = best_features
+                        validator.advance(best_features)
                         continuity_segments.append(dict(
                             segment=seg_idx + 1, attempts=attempts,
                             selected_attempt=selected_attempt,

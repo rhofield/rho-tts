@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.5] - 2026-10-06
+
+### Changed
+- Audio continuity judges speaker identity against the provider's reference voice plus at least 3 s of recently accepted speech, instead of the last segment alone. Short segments produced unreliable speaker embeddings, so a 0.8 s opening sentence failed every successor while passing itself unchecked. With a reference voice, the first segment is checked too. Loudness is still compared with recent accepted speech only.
+- When accent drift fails, text validation is reported as `skipped` rather than `unavailable` and no longer appears in rejection or fallback reasons.
+
 ## [1.3.2] - 2026-09-30
 
 ### Added

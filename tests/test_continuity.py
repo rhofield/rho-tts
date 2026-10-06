@@ -68,6 +68,9 @@ class TestContinuity:
         assert segment["fallback"]
         assert all(attempt["text_passed"] is None for attempt in segment["attempts"])
         assert result.text_similarity is None
+        selected = result.acceptance["segments"][0]
+        assert selected["validators"]["text"]["status"] == "skipped"
+        assert selected["fallback_reasons"] == ["accent failed", "retries exhausted"]
 
     def test_retry_reports_only_measured_text_verdicts(self):
         tts = self.tts
@@ -182,14 +185,48 @@ class TestContinuity:
             module.speech_level(np.zeros(16000), 16000)
 
     def test_speaker_mismatch(self, monkeypatch):
-        features = iter([(np.array([1.0, 0.0]), -20.0), (np.array([0.0, 1.0]), -20.0)])
-        monkeypatch.setattr(module, "_features", lambda *a: next(features))
+        # Positive samples are one speaker, negative samples another.
+        monkeypatch.setattr(
+            module, "_features", lambda samples, rate: (np.array([1.0, 0.0] if samples.mean() > 0 else [0.0, 1.0]), -20.0)
+        )
         validator = module.ContinuityValidator(ContinuityConfig())
-        _, validator.previous = validator.evaluate(torch.ones(16000), 16000)
-        result, _ = validator.evaluate(torch.ones(16000), 16000)
+        _, speech = validator.evaluate(torch.ones(16000) * 0.1, 16000)
+        validator.advance(speech)
+        result, _ = validator.evaluate(-torch.ones(16000) * 0.1, 16000)
         assert not result["passed"]
         assert result["speaker_similarity"] == 0
-        assert result["loudness_difference_db"] == 0
+        assert result["loudness_difference_db"] == pytest.approx(0, abs=1e-6)
+
+    def test_short_predecessor_is_not_the_whole_anchor(self):
+        validator = module.ContinuityValidator(ContinuityConfig())
+        clip = lambda seconds: np.ones(int(seconds * 16000), dtype=np.float32)
+        for seconds in (0.8, 2.0, 2.0):
+            validator.advance(clip(seconds))
+        # The 0.8 s clip is dropped only once newer speech covers the window.
+        assert [len(s) / 16000 for s in validator.previous] == [2.0, 2.0]
+        validator.advance(clip(4.0))
+        assert [len(s) / 16000 for s in validator.previous] == [4.0]
+
+    def test_reference_voice_checks_the_first_segment(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            module, "_features", lambda samples, rate: (np.array([1.0, 0.0] if samples.mean() > 0 else [0.0, 1.0]), -20.0)
+        )
+        voice = tmp_path / "voice.wav"
+        sf.write(voice, np.full(24000, 0.1), 24000)
+        validator = module.ContinuityValidator(ContinuityConfig(), reference_audio=str(voice))
+        result, _ = validator.evaluate(-torch.ones(16000) * 0.1, 16000)
+        assert not result["passed"]
+        assert result["reference_voice"]
+        assert result["anchor_seconds"] == pytest.approx(1.0)
+        assert result["loudness_difference_db"] is None
+
+    def test_provider_reference_voice_anchors_generation(self, tmp_path):
+        tts = self.tts
+        tts.reference_audio_path = str(reference(tmp_path))
+        candidates(tts, [0.1])
+        result = tts.generate("Hello", continuity=ContinuityConfig())
+        attempt = result.continuity["segments"][0]["attempts"][0]
+        assert attempt["reference_voice"] and attempt["passed"]
 
     @pytest.mark.parametrize(
         "kwargs",
