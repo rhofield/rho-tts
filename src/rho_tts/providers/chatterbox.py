@@ -30,6 +30,8 @@ class ChatterboxTTS(BaseTTS):
             If not provided, uses the model's default voice.
         implementation: "standard" or "faster" (rsxdalv optimizations)
         max_chars_per_segment: Max characters per text segment (default: auto-computed)
+        split_on: Text to split segments on (default ". "). None sends each
+            text to the model whole, with no sentence or length splitting
         max_iterations: Maximum validation retry iterations (default: 50)
         accent_drift_threshold: Threshold for accent drift (default: 0.17)
         text_similarity_threshold: Min similarity for STT validation (default: 0.75)
@@ -50,6 +52,7 @@ class ChatterboxTTS(BaseTTS):
         reference_audio: Optional[str] = None,
         implementation: str = "standard",
         max_chars_per_segment: Optional[int] = None,
+        split_on: Optional[str] = ". ",
         max_iterations: int = 50,
         accent_drift_threshold: float = 0.17,
         text_similarity_threshold: float = 0.75,
@@ -72,6 +75,7 @@ class ChatterboxTTS(BaseTTS):
         self._max_chars_explicit = max_chars_per_segment is not None
         self.max_chars_per_segment = max_chars_per_segment if max_chars_per_segment is not None else 800
         self.max_iterations = max_iterations
+        self.split_on = split_on
         self.accent_drift_threshold = accent_drift_threshold
         self.text_similarity_threshold = text_similarity_threshold
 

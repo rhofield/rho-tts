@@ -33,6 +33,8 @@ class QwenTTS(BaseTTS):
         model_path: Path to local model or HuggingFace model ID
             (default: "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
         max_chars_per_segment: Maximum characters per text segment (default: auto-computed)
+        split_on: Text to split segments on (default ". "). None sends each
+            text to the model whole, with no sentence or length splitting
         batch_size: Number of texts to process per batch (default: 5)
         max_iterations: Maximum validation retry iterations (default: 10)
         accent_drift_threshold: Threshold for accent drift validation (default: 0.17)
@@ -56,6 +58,7 @@ class QwenTTS(BaseTTS):
         language: str = "English",
         model_path: str = "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
         max_chars_per_segment: Optional[int] = None,
+        split_on: Optional[str] = ". ",
         batch_size: int = 5,
         max_iterations: int = 10,
         accent_drift_threshold: float = 0.17,
@@ -82,6 +85,7 @@ class QwenTTS(BaseTTS):
         self.max_chars_per_segment = max_chars_per_segment if max_chars_per_segment is not None else 1000
         self.batch_size = batch_size
         self.force_sentence_split = False
+        self.split_on = split_on
         self.max_iterations = max_iterations
         self.accent_drift_threshold = accent_drift_threshold
         self.text_similarity_threshold = text_similarity_threshold

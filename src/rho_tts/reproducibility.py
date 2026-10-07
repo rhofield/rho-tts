@@ -50,9 +50,11 @@ def generation_manifest(provider, texts, *, job_id=None, job_seed=None, continui
              'voice_id', 'reference_text', 'attn_implementation', 'fast', 'compile_depth', 'cuda_graph_depth',
              'triton_depth_sampling', 'codec_chunk_frames', 'cfg_scale', 'instruction', 'temperature', 'top_p',
              'top_k', 'max_chars_per_segment', '_max_chars_explicit', '_max_model_chars', 'force_sentence_split',
-             'min_segment_chars', 'silence_threshold_db', 'trim_silence', 'crossfade_duration_sec', 'fade_duration_sec',
+             'split_on', 'min_segment_chars', 'silence_threshold_db', 'trim_silence', 'crossfade_duration_sec', 'fade_duration_sec',
              'inter_sentence_pause_sec', 'reference_resample_device', 'segment_level_db')
     settings = {name: getattr(provider, name, None) for name in names}
+    # Match the splitter's default so a provider without the attribute isn't recorded as unsplit.
+    settings['split_on'] = getattr(provider, 'split_on', '. ')
     settings['sample_rate'] = provider.sample_rate
     settings['resolved_max_chars'] = provider._compute_max_chars()
     model = getattr(provider, 'model', None)
