@@ -101,6 +101,8 @@ class BreezeTTS(BaseTTS):
             match in loudness. None leaves output as generated.
         strict_validation: Require working validators and reject audio after failed retries
         max_chars_per_segment: Max characters per text segment
+        split_on: Text to split segments on (default ". "). None sends each
+            text to the model whole, with no sentence or length splitting
         max_iterations: Maximum validation retry iterations
         accent_drift_threshold: Threshold for accent drift
         text_similarity_threshold: Min similarity for STT validation
@@ -123,6 +125,7 @@ class BreezeTTS(BaseTTS):
         fast: bool = False,
         strict_validation: bool = False,
         max_chars_per_segment: Optional[int] = None,
+        split_on: Optional[str] = ". ",
         max_iterations: int = 10,
         accent_drift_threshold: float = 0.17,
         text_similarity_threshold: float = 0.85,
@@ -191,6 +194,7 @@ class BreezeTTS(BaseTTS):
             max_chars_per_segment if max_chars_per_segment is not None else 800
         )
         self.max_iterations = max_iterations
+        self.split_on = split_on
         self.accent_drift_threshold = accent_drift_threshold
         self.text_similarity_threshold = text_similarity_threshold
 

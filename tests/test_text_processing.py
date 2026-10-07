@@ -96,6 +96,35 @@ class TestTextSplitting:
         assert len(result) == 1
 
 
+class TestSplitOn:
+    """``split_on`` picks the delimiter; None hands the model each text whole."""
+
+    TEXT = "Here's a puzzle. Take three boxes: dog, bites, man. So how does a model notice?"
+
+    def test_default_splits_on_full_stop(self):
+        assert len(ConcreteTTS()._split_text_into_segments(self.TEXT, 1000)) == 3
+
+    def test_none_keeps_text_whole(self):
+        tts = ConcreteTTS()
+        tts.split_on = None
+        assert tts._split_text_into_segments(f"  {self.TEXT} ", 1000) == [self.TEXT]
+
+    def test_none_ignores_max_chars(self):
+        tts = ConcreteTTS()
+        tts.split_on = None
+        assert tts._split_text_into_segments(self.TEXT, 20) == [self.TEXT]
+
+    def test_none_empty_text(self):
+        tts = ConcreteTTS()
+        tts.split_on = None
+        assert tts._split_text_into_segments("   ", 100) == []
+
+    def test_custom_delimiter(self):
+        tts = ConcreteTTS()
+        tts.split_on = "\n"
+        assert tts._split_text_into_segments("One. Two.\nThree.", 1000) == ["One. Two.", "Three."]
+
+
 class TestShortSentenceMerging:
     """A one-line opener spoken alone has too little context to settle the voice
     and too little voiced audio for continuity to judge, so it merges onward."""

@@ -73,6 +73,7 @@ class TestReproducibility:
             lambda: setattr(tts, 'reference_text', 'New transcript'),
             lambda: setattr(tts, 'accent_drift_threshold', .5),
             lambda: setattr(tts, 'force_sentence_split', False),
+            lambda: setattr(tts, 'split_on', None),
             lambda: setattr(tts, 'fade_duration_sec', .3),
             lambda: setattr(tts, 'cuda_graph_depth', True),
         ):

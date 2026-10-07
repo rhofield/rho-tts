@@ -88,6 +88,8 @@ class BaseTTS(ABC):
         self.trim_silence = True
         self.fade_duration_sec = 0.02
         self.force_sentence_split = True
+        # Delimiter text is split on before length limits apply; None sends each text whole.
+        self.split_on: Optional[str] = ". "
         # Sentences shorter than this merge with a neighbour; 0 keeps every split.
         self.min_segment_chars = 0
         self.inter_sentence_pause_sec = 0.1
@@ -598,18 +600,21 @@ class BaseTTS(ABC):
 
         Args:
             text: Text to split
-            max_chars: Maximum characters per segment
+            max_chars: Maximum characters per segment (ignored when ``split_on`` is None)
 
         Returns:
             List of text segments
         """
-        sentences = text.split('. ')
+        split_on = getattr(self, 'split_on', ". ")
+        if split_on is None:
+            return [text.strip()] if text.strip() else []
+        sentences = text.split(split_on)
         segments = []
         current_segment = ""
 
         for sentence in sentences:
             if sentence != sentences[-1]:
-                sentence += ". "
+                sentence += split_on
 
             force_split = self.force_sentence_split and len(sentences) > 1
 
@@ -794,7 +799,7 @@ class BaseTTS(ABC):
             'text_similarity_threshold', 'sound_decay_threshold', 'drift_model_path', 'voice_id',
             'reference_audio_path', 'reference_text', 'attn_implementation', 'fast', 'compile_depth',
             'cuda_graph_depth', 'codec_chunk_frames', 'deterministic', 'force_sentence_split',
-            'min_segment_chars', 'cfg_scale', 'instruction', 'temperature', 'top_p', 'top_k',
+            'split_on', 'min_segment_chars', 'cfg_scale', 'instruction', 'temperature', 'top_p', 'top_k',
             'crossfade_duration_sec', 'inter_sentence_pause_sec', 'segment_level_db')}
         if continuity is not None:
             from dataclasses import asdict
